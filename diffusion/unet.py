@@ -1,8 +1,11 @@
 """
 TODO:
+0) Maybe debug guided diffusion? Diffusers looks more readable
 1) Add sin embedding into res block
 2) Attention blocks in each ResBlock
-
+3) Learn sigma
+4) Group norm
+5) Not use ConvTranspose2D (cross artifacts)
 """
 
 import torch
@@ -62,6 +65,8 @@ class DownBlock(nn.Module):
         super().__init__()
 
         self.depth = depth
+        self.in_channels = in_channels
+        self.out_channels = out_channels
 
         self.res_blocks = nn.ModuleList()
         self.res_blocks.append(ResidualBlock(in_channels,out_channels))
@@ -92,6 +97,8 @@ class UpBlock(nn.Module):
     def __init__(self, in_channels:int,out_channels:int,depth:int):
         super().__init__()
 
+        self.in_channels = in_channels
+        self.out_channels = out_channels
         self.depth = depth
 
         # Make it 2x bigger

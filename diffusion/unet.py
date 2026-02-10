@@ -3,7 +3,6 @@ TODO:
 0) Maybe debug guided diffusion? Diffusers looks more readable
 1) Attention blocks in each ResBlock
 2) Learn sigma
-3) Not use ConvTranspose2D (cross artifacts)
 """
 
 import torch
@@ -12,18 +11,19 @@ from typing import List
 
 class SinusoidalEmbedding(nn.Module):
 
-    def __init__(self, noise_embedding_size:int):
+    def __init__(self, noise_embedding_size:int,n_timesteps:int):
         ## TODO: Add options for the log levels
         super().__init__()
 
         self.embed_size = noise_embedding_size
+        self.T = n_timesteps
         # Between log(1) to log(1000)
         frequencies = torch.exp(torch.linspace(0, 3, self.embed_size // 2))
         self.angular_speeds = 2.0 * torch.pi * frequencies
     
     def forward(self,x):
 
-        x/= self.embed_size
+        x/= self.T
 
         embeddings = torch.concat([torch.sin(self.angular_speeds * x), torch.cos(self.angular_speeds * x)], dim=-1)
         return embeddings
@@ -150,7 +150,7 @@ class DownBlock(nn.Module):
         for _ in range(depth-1):
             self.res_blocks.append(ResidualBlock(out_channels,out_channels,time_embedding_norm,noise_embed_dim))
         
-        self.pool = nn.AvgPool2d(kernel_size=2)
+        self.downsample = nn.Conv2d(out_channels, out_channels, 3, stride=2, padding=1)
 
 
     def forward(self,x,temb):
@@ -163,7 +163,7 @@ class DownBlock(nn.Module):
 
             skips.append(x)
 
-        x = self.pool(x)
+        x = self.downsample(x)
         
         return x, skips
 
@@ -183,7 +183,10 @@ class UpBlock(nn.Module):
         self.depth = depth
 
         # Make it 2x bigger
-        self.up_sample = nn.ConvTranspose2d(in_channels,in_channels, kernel_size=2, stride=2)
+        self.up_sample = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode="nearest"),
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+        )
 
         self.res_blocks = nn.ModuleList()
         for _ in range(depth-1):
@@ -226,7 +229,7 @@ class UNet(nn.Module):
         # 1) Get t ∈[0,T]        
         self.noise_pipeline = nn.Sequential(
         # 2) Do sin embedding to get a vector of size embed_dim
-        SinusoidalEmbedding(noise_embed_dim),
+        SinusoidalEmbedding(noise_embed_dim,time_const),
         # 3) Pass it through a MLP: embed_dim -> 4*embed_dim
         nn.Linear(self.noise_embed_dim,4*self.noise_embed_dim),
         # 4) Activation
@@ -265,7 +268,6 @@ class UNet(nn.Module):
 
         temb = self.noise_pipeline(noise_level)
         x = self.input_conv(img) 
-        # temb = self.embed_mlp(noise)[:,:,None,None]
 
         skips = []
         for db in self.down_blocks:

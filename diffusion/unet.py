@@ -1,11 +1,9 @@
 """
 TODO:
 0) Maybe debug guided diffusion? Diffusers looks more readable
-1) Add sin embedding into res block
-2) Attention blocks in each ResBlock
-3) Learn sigma
-4) Group norm
-5) Not use ConvTranspose2D (cross artifacts)
+1) Attention blocks in each ResBlock
+2) Learn sigma
+3) Not use ConvTranspose2D (cross artifacts)
 """
 
 import torch
@@ -31,9 +29,65 @@ class SinusoidalEmbedding(nn.Module):
         return embeddings
 
 
+class AdditiveTimeConditioning(nn.Module):
+
+    def __init__(self,temb_channels: int,out_channels:int,n_groups:int):
+        super().__init__()
+        
+        self.temb_channels = temb_channels
+        self.out_channels = out_channels
+
+        self.norm = nn.GroupNorm(n_groups,out_channels, eps= 1e-6,affine=True)
+        self.proj = nn.Linear(temb_channels,out_channels)
+    
+    def forward(self,x,temb):
+        
+        x = self.proj(temb)[:, :, None, None] + x
+        x = self.norm(x)
+
+        return x
+
+        
+
+class ScaleShiftConditioning(nn.Module):
+    """
+    https://arxiv.org/abs/1709.07871
+    https://github.com/caffeinism/FiLM-pytorch?tab=readme-ov-file
+    """
+    def __init__(self,temb_channels: int,out_channels:int,n_groups:int):
+        super().__init__()
+        
+        self.temb_channels = temb_channels
+        self.out_channels = out_channels
+
+        self.proj = nn.Linear(temb_channels,2*out_channels)
+        self.norm = nn.GroupNorm(n_groups,out_channels, eps= 1e-6,affine=True)
+
+    def forward(self,x,temb):
+
+        proj_temb = self.proj(temb)
+
+        scale, shift = torch.chunk(proj_temb,2,dim = 1)
+
+        x = self.norm(x)
+        
+        scale = scale[:, :, None, None]
+        shift = shift[:, :, None, None]
+        
+        return x*(1 + scale) + shift
+        
+
+
 class ResidualBlock(nn.Module):
 
-    def __init__(self, in_channels,out_channels):
+    def __init__(self, 
+                 in_channels:int,
+                 out_channels:int,
+                 time_embedding_norm:str,  ## additive or scale-shift/ FiLM
+                 noise_embed_dim:int = 128,
+                 n_groups:int = 32,
+                 dropout:float = 0.0
+                 ):
         super().__init__()
 
         if (in_channels == out_channels):
@@ -41,19 +95,36 @@ class ResidualBlock(nn.Module):
         else:
             self.res = nn.Conv2d(in_channels,out_channels,kernel_size=1)
         
-        self.batch_norm = nn.BatchNorm2d(in_channels,affine=False)
-        
+        self.norm1 = nn.GroupNorm(n_groups,in_channels, eps= 1e-6,affine=True) 
+
         self.conv1 = nn.Conv2d(in_channels,out_channels,kernel_size=3,padding=1)
+
+        if time_embedding_norm == "additive":
+            self.temb_pipeline = AdditiveTimeConditioning(noise_embed_dim,out_channels,n_groups)
+        
+        elif time_embedding_norm == "film":
+            self.temb_pipeline = ScaleShiftConditioning(noise_embed_dim,out_channels,n_groups)
+        
+        else:
+            raise ValueError(f"Unkown time_embedding_norm, got {time_embedding_norm}, expected: 'additive',film")
+
         self.activation = nn.SiLU(inplace=True)
+
+        self.dropout = torch.nn.Dropout(dropout)
+        
         self.conv2 = nn.Conv2d(out_channels,out_channels,kernel_size=3,padding=1)
 
 
-    def forward(self,x):
+    def forward(self,x,temb):
 
         res = self.res(x)
-        x = self.batch_norm(x)
-        x = self.conv1(x)
+        x = self.norm1(x)
         x = self.activation(x)
+        x = self.conv1(x)
+        temb = self.activation(temb)
+        x = self.temb_pipeline(x,temb)
+        x = self.activation(x)
+        x = self.dropout(x)
         x = self.conv2(x)
 
         return x + res
@@ -61,7 +132,12 @@ class ResidualBlock(nn.Module):
     
 class DownBlock(nn.Module):
 
-    def __init__(self, in_channels:int,out_channels:int,depth:int):
+    def __init__(self, in_channels:int,
+                 out_channels:int,
+                 depth:int,
+                 time_embedding_norm:str,
+                 noise_embed_dim:int,
+                 ):
         super().__init__()
 
         self.depth = depth
@@ -69,21 +145,21 @@ class DownBlock(nn.Module):
         self.out_channels = out_channels
 
         self.res_blocks = nn.ModuleList()
-        self.res_blocks.append(ResidualBlock(in_channels,out_channels))
+        self.res_blocks.append(ResidualBlock(in_channels,out_channels,time_embedding_norm,noise_embed_dim))
 
         for _ in range(depth-1):
-            self.res_blocks.append(ResidualBlock(out_channels,out_channels))
+            self.res_blocks.append(ResidualBlock(out_channels,out_channels,time_embedding_norm,noise_embed_dim))
         
         self.pool = nn.AvgPool2d(kernel_size=2)
 
 
-    def forward(self,x):
+    def forward(self,x,temb):
 
         skips = []
         
         for res_block in self.res_blocks:
 
-            x = res_block(x)
+            x = res_block(x,temb)
 
             skips.append(x)
 
@@ -94,7 +170,12 @@ class DownBlock(nn.Module):
 
 class UpBlock(nn.Module):
 
-    def __init__(self, in_channels:int,out_channels:int,depth:int):
+    def __init__(self, in_channels:int,
+                 out_channels:int,
+                 depth:int,
+                 time_embedding_norm:str,
+                 noise_embed_dim:int,
+                 ):
         super().__init__()
 
         self.in_channels = in_channels
@@ -106,12 +187,12 @@ class UpBlock(nn.Module):
 
         self.res_blocks = nn.ModuleList()
         for _ in range(depth-1):
-            self.res_blocks.append(ResidualBlock(2*in_channels,in_channels))
+            self.res_blocks.append(ResidualBlock(2*in_channels,in_channels,time_embedding_norm,noise_embed_dim))
         
-        self.res_blocks.append(ResidualBlock(2*in_channels,out_channels))
+        self.res_blocks.append(ResidualBlock(2*in_channels,out_channels,time_embedding_norm,noise_embed_dim))
         
     
-    def forward(self,x):
+    def forward(self,x, temb):
 
         # Unpack the skips from the down block
         x, skips = x
@@ -121,7 +202,7 @@ class UpBlock(nn.Module):
         for res_block in self.res_blocks:
 
             x = torch.cat((x,skips.pop()),dim =1)
-            x = res_block(x)
+            x = res_block(x,temb)
         
         return x
     
@@ -131,6 +212,7 @@ class UNet(nn.Module):
     def __init__(self, 
                  in_channels:int, 
                  time_const:int,
+                 time_embedding_norm:str = "additive",
                  block_depth:int = 2,
                  block_sizes:List[int] = [32,64,96],
                  n_res_blocks:int = 2,
@@ -152,12 +234,11 @@ class UNet(nn.Module):
         # 5) 2nd MLP 4*self.noise_embed_dim->in_channels
         nn.Linear(4*self.noise_embed_dim,self.noise_embed_dim),
         )
-        self.embed_mlp = nn.Linear(self.noise_embed_dim,block_sizes[0])
         self.input_conv = nn.Conv2d(in_channels,block_sizes[0],kernel_size=3,padding=1)
 
         self.down_blocks = nn.ModuleList(
             [
-                DownBlock(block_sizes[i],block_sizes[i+1],block_depth)
+                DownBlock(block_sizes[i],block_sizes[i+1],block_depth,time_embedding_norm,noise_embed_dim)
                 for i in range(len(block_sizes)-1)
             ]
         )
@@ -165,7 +246,7 @@ class UNet(nn.Module):
         horz_channels = [block_sizes[-1]]*n_res_blocks
         self.horz_blocks = nn.Sequential(
             *[
-                ResidualBlock(horz_channels[i],horz_channels[i+1])
+                ResidualBlock(horz_channels[i],horz_channels[i+1],time_embedding_norm,noise_embed_dim)
                 for i in range(len(horz_channels)-1)
             ]
         )
@@ -173,28 +254,30 @@ class UNet(nn.Module):
         up_channels =  list(reversed(block_sizes))
         self.up_blocks = nn.ModuleList(
             [
-                UpBlock(up_channels[i],up_channels[i+1],block_depth)
+                UpBlock(up_channels[i],up_channels[i+1],block_depth,time_embedding_norm,noise_embed_dim)
                 for i in range(len(up_channels)-1)
             ]
         )
 
-        self.out_conv = nn.Conv2d(block_sizes[-1],in_channels,kernel_size=3,padding=1)
+        self.out_conv = nn.Conv2d(block_sizes[0],in_channels,kernel_size=3,padding=1)
         
     def forward(self,img,noise_level):
 
-        noise = self.noise_pipeline(noise_level)
-        x = self.input_conv(img) + self.embed_mlp(noise)[:,:,None,None]
+        temb = self.noise_pipeline(noise_level)
+        x = self.input_conv(img) 
+        # temb = self.embed_mlp(noise)[:,:,None,None]
 
         skips = []
         for db in self.down_blocks:
 
-            x , level_skips = db(x)
+            x , level_skips = db(x,temb)
             skips.append(level_skips)
         
-        x = self.horz_blocks(x)
+        for block in self.horz_blocks:
+            x = block(x, temb)
 
         for ub, level_skips in zip(self.up_blocks, reversed(skips)):
-            x = ub((x, level_skips))
+            x = ub((x, level_skips),temb)
 
         x = self.out_conv(x)
         

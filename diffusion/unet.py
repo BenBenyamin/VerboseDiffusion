@@ -1,8 +1,17 @@
 """
 TODO:
 0) Maybe debug guided diffusion? Diffusers looks more readable
-1) Attention blocks in each ResBlock
-2) Learn sigma
+1) Attention blocks in each ResBlock?
+2) Learn sigma?
+
+Orginal paper:
+https://arxiv.org/pdf/2006.11239
+
+Improved paper:
+https://proceedings.mlr.press/v139/nichol21a/nichol21a.pdf
+
+Group norm paper:
+https://arxiv.org/pdf/1803.08494
 """
 
 import torch
@@ -11,14 +20,21 @@ from typing import List
 
 class SinusoidalEmbedding(nn.Module):
 
-    def __init__(self, noise_embedding_size:int,n_timesteps:int):
-        ## TODO: Add options for the log levels
+    def __init__(self, 
+                 noise_embedding_size:int,
+                 n_timesteps:int,
+                 min_freq:float = 1.0,
+                 max_freq:float = 1000.0,
+                 ):
         super().__init__()
+
+        min_freq = torch.log10(torch.tensor(min_freq,dtype=torch.float16))
+        max_freq = torch.log10(torch.tensor(max_freq,dtype=torch.float16))
 
         self.embed_size = noise_embedding_size
         self.T = n_timesteps
-        # Between log(1) to log(1000)
-        frequencies = torch.exp(torch.linspace(0, 3, self.embed_size // 2))
+
+        frequencies = torch.exp(torch.linspace(min_freq,max_freq , self.embed_size // 2))
         self.angular_speeds = 2.0 * torch.pi * frequencies
     
     def forward(self,x):
@@ -129,14 +145,66 @@ class ResidualBlock(nn.Module):
 
         return x + res
 
+class AttentionBlock(nn.Module):
+
+    def __init__(self,  
+                 channels:int = 3,
+                 num_heads:int = 4,
+                 dropout:float = 0.0,
+                 norm:str = "group", # Group / layer
+                 n_groups:int = 32,
+                 ):
+        
+        super().__init__()
+
+        if norm == "group":
+            self.norm = nn.GroupNorm(n_groups,channels,eps=1e-6,affine=True)
+        elif norm == "layer":
+            self.norm = nn.LayerNorm(channels)
+        else:
+            raise ValueError(f"Unkown norm type, got {norm}, expected: 'group','layer'")
+        
+        self.attn = nn.MultiheadAttention(
+
+            embed_dim=channels,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+
+        self.linear = nn.Linear(channels,channels)
     
+    def forward(self,x):
+
+        B, C, H, W = x.shape
+
+        x = self.norm(x)
+
+        x = x.view(B, C, H * W).transpose(1, 2).contiguous()
+
+        x_attn, _ = self.attn(x, x, x, need_weights=False)
+        
+        x_attn = self.linear(x_attn)
+
+        x_attn = x_attn.transpose(1, 2).contiguous().view(B, C, H, W)
+
+
+        return x_attn
+        
+
+
 class DownBlock(nn.Module):
 
-    def __init__(self, in_channels:int,
+    def __init__(self, 
+                 in_channels:int,
                  out_channels:int,
                  depth:int,
                  time_embedding_norm:str,
                  noise_embed_dim:int,
+                 n_groups:int = 32,
+                 num_heads:int = 0,
+                 dropout:float = 0.0,
+                 norm:str = "group", # Group / layer
                  ):
         super().__init__()
 
@@ -145,12 +213,35 @@ class DownBlock(nn.Module):
         self.out_channels = out_channels
 
         self.res_blocks = nn.ModuleList()
-        self.res_blocks.append(ResidualBlock(in_channels,out_channels,time_embedding_norm,noise_embed_dim))
+        self.res_blocks.append(ResidualBlock(in_channels,
+                                             out_channels,
+                                             time_embedding_norm,
+                                             noise_embed_dim,
+                                             n_groups,
+                                             dropout,
+                                             ))
 
         for _ in range(depth-1):
-            self.res_blocks.append(ResidualBlock(out_channels,out_channels,time_embedding_norm,noise_embed_dim))
+            self.res_blocks.append(ResidualBlock(out_channels,
+                                                 out_channels,
+                                                 time_embedding_norm,
+                                                 noise_embed_dim,
+                                                 n_groups,
+                                                 dropout,
+                                                 ))
         
         self.downsample = nn.Conv2d(out_channels, out_channels, 3, stride=2, padding=1)
+
+        self.has_attn = num_heads > 0
+
+        if self.has_attn  :
+            self.attn = AttentionBlock(
+                out_channels,
+                num_heads,
+                dropout,
+                norm,
+                n_groups
+            )
 
 
     def forward(self,x,temb):
@@ -164,6 +255,9 @@ class DownBlock(nn.Module):
             skips.append(x)
 
         x = self.downsample(x)
+
+        if self.has_attn:
+            x = self.attn(x)
         
         return x, skips
 
@@ -175,6 +269,10 @@ class UpBlock(nn.Module):
                  depth:int,
                  time_embedding_norm:str,
                  noise_embed_dim:int,
+                 n_groups:int = 32,
+                 num_heads:int = 0,
+                 dropout:float = 0.0,
+                 norm:str = "group", # Group / layer
                  ):
         super().__init__()
 
@@ -183,16 +281,40 @@ class UpBlock(nn.Module):
         self.depth = depth
 
         # Make it 2x bigger
-        self.up_sample = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="nearest"),
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-        )
+        self.up_sample = nn.Upsample(scale_factor=2, mode="nearest"),
 
         self.res_blocks = nn.ModuleList()
         for _ in range(depth-1):
-            self.res_blocks.append(ResidualBlock(2*in_channels,in_channels,time_embedding_norm,noise_embed_dim))
+            self.res_blocks.append(ResidualBlock(2*in_channels,
+                                                 in_channels,
+                                                 time_embedding_norm,
+                                                 noise_embed_dim,
+                                                 n_groups,
+                                                 dropout,
+                                                 ))
+            # self.res_blocks.append(ResidualBlock(2*in_channels,in_channels,time_embedding_norm,noise_embed_dim))
         
-        self.res_blocks.append(ResidualBlock(2*in_channels,out_channels,time_embedding_norm,noise_embed_dim))
+            
+        
+        self.res_blocks.append(ResidualBlock(2*in_channels,
+                                             out_channels,
+                                             time_embedding_norm,
+                                             noise_embed_dim,
+                                             n_groups,
+                                             dropout,
+                                             ))
+
+        self.has_attn = num_heads > 0
+
+        if self.has_attn  :
+            self.attn = AttentionBlock(
+                out_channels,
+                num_heads,
+                dropout,
+                norm,
+                n_groups
+            )
+
         
     
     def forward(self,x, temb):
@@ -207,7 +329,11 @@ class UpBlock(nn.Module):
             x = torch.cat((x,skips.pop()),dim =1)
             x = res_block(x,temb)
         
+        if self.has_attn:
+            x = self.attn(x)
+        
         return x
+
     
 
 class UNet(nn.Module):
@@ -247,6 +373,7 @@ class UNet(nn.Module):
         )
 
         horz_channels = [block_sizes[-1]]*n_res_blocks
+
         self.horz_blocks = nn.Sequential(
             *[
                 ResidualBlock(horz_channels[i],horz_channels[i+1],time_embedding_norm,noise_embed_dim)

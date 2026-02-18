@@ -34,7 +34,7 @@ class SinusoidalEmbedding(nn.Module):
         self.embed_size = noise_embedding_size
         self.T = n_timesteps
 
-        frequencies = torch.exp(torch.linspace(min_freq,max_freq , self.embed_size // 2))
+        frequencies = torch.pow(10,torch.linspace(min_freq,max_freq , self.embed_size // 2))
         self.angular_speeds = 2.0 * torch.pi * frequencies
     
     def forward(self,x):
@@ -91,7 +91,6 @@ class ScaleShiftConditioning(nn.Module):
         shift = shift[:, :, None, None]
         
         return x*(1 + scale) + shift
-        
 
 
 class ResidualBlock(nn.Module):
@@ -151,21 +150,19 @@ class AttentionBlock(nn.Module):
                  channels:int = 3,
                  num_heads:int = 4,
                  dropout:float = 0.0,
-                 norm:str = "group", # Group / layer
+                 norm:bool = True,
                  n_groups:int = 32,
                  ):
         
         super().__init__()
 
-        if norm == "group":
+        if norm:
             self.norm = nn.GroupNorm(n_groups,channels,eps=1e-6,affine=True)
-        elif norm == "layer":
-            self.norm = nn.LayerNorm(channels)
+
         else:
-            raise ValueError(f"Unkown norm type, got {norm}, expected: 'group','layer'")
+            self.norm = None
         
         self.attn = nn.MultiheadAttention(
-
             embed_dim=channels,
             num_heads=num_heads,
             dropout=dropout,
@@ -178,7 +175,9 @@ class AttentionBlock(nn.Module):
 
         B, C, H, W = x.shape
 
-        x = self.norm(x)
+        if self.norm is not None:
+        
+            x = self.norm(x)
 
         x = x.view(B, C, H * W).transpose(1, 2).contiguous()
 
@@ -191,8 +190,6 @@ class AttentionBlock(nn.Module):
 
         return x_attn
         
-
-
 class DownBlock(nn.Module):
 
     def __init__(self, 
@@ -204,7 +201,7 @@ class DownBlock(nn.Module):
                  n_groups:int = 32,
                  num_heads:int = 0,
                  dropout:float = 0.0,
-                 norm:str = "group", # Group / layer
+                 norm:bool = True, # group
                  ):
         super().__init__()
 
@@ -272,7 +269,7 @@ class UpBlock(nn.Module):
                  n_groups:int = 32,
                  num_heads:int = 0,
                  dropout:float = 0.0,
-                 norm:str = "group", # Group / layer
+                 norm:bool = True, # Group
                  ):
         super().__init__()
 
@@ -281,7 +278,7 @@ class UpBlock(nn.Module):
         self.depth = depth
 
         # Make it 2x bigger
-        self.up_sample = nn.Upsample(scale_factor=2, mode="nearest"),
+        self.up_sample = nn.Upsample(scale_factor=2, mode="nearest")
 
         self.res_blocks = nn.ModuleList()
         for _ in range(depth-1):
@@ -314,9 +311,6 @@ class UpBlock(nn.Module):
                 norm,
                 n_groups
             )
-
-        
-    
     def forward(self,x, temb):
 
         # Unpack the skips from the down block
@@ -334,7 +328,6 @@ class UpBlock(nn.Module):
         
         return x
 
-    
 
 class UNet(nn.Module):
 
@@ -346,6 +339,11 @@ class UNet(nn.Module):
                  block_sizes:List[int] = [32,64,96],
                  n_res_blocks:int = 2,
                  noise_embed_dim:int = 128,
+                 n_groups:int = 32,
+                 n_attn_heads:int = 4,
+                 attn_levels:List[bool] = [False,True,True],
+                 norm_attn:bool = True,
+                 dropout:float = 0.0,
                  ):
 
         super().__init__()
@@ -367,7 +365,16 @@ class UNet(nn.Module):
 
         self.down_blocks = nn.ModuleList(
             [
-                DownBlock(block_sizes[i],block_sizes[i+1],block_depth,time_embedding_norm,noise_embed_dim)
+                DownBlock(
+                    block_sizes[i],
+                    block_sizes[i+1],
+                    block_depth,time_embedding_norm,
+                    noise_embed_dim,
+                    n_groups,
+                    norm=norm_attn,
+                    num_heads=n_attn_heads if attn_levels[i] else 0,
+                    dropout=dropout,
+                    )
                 for i in range(len(block_sizes)-1)
             ]
         )
@@ -382,9 +389,20 @@ class UNet(nn.Module):
         )
         
         up_channels =  list(reversed(block_sizes))
+        rev_attn_lvl = list(reversed(attn_levels))
         self.up_blocks = nn.ModuleList(
             [
-                UpBlock(up_channels[i],up_channels[i+1],block_depth,time_embedding_norm,noise_embed_dim)
+                UpBlock(
+                    up_channels[i],
+                    up_channels[i+1],
+                    block_depth,
+                    time_embedding_norm,
+                    noise_embed_dim,
+                    n_groups,
+                    norm=norm_attn,
+                    num_heads=n_attn_heads if rev_attn_lvl[i] else 0,
+                    dropout=dropout,
+                    )
                 for i in range(len(up_channels)-1)
             ]
         )

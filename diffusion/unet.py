@@ -1,8 +1,24 @@
 """
-TODO:
-0) Maybe debug guided diffusion? Diffusers looks more readable
-1) Attention blocks in each ResBlock?
-2) Learn sigma?
+TODO: Condition the model
+
+It seems like the after this everything else stays the same (from diffusers):
+
+class_emb = self.get_class_embed(sample=sample, class_labels=class_labels)
+if class_emb is not None:
+    if self.config.class_embeddings_concat:
+        emb = torch.cat([emb, class_emb], dim=-1)
+    else:
+        emb = emb + class_emb
+
+
+if class_embed_type is None and num_class_embeds is not None:
+            self.class_embedding = nn.Embedding(num_class_embeds, time_embed_dim)
+        elif class_embed_type == "timestep":
+            self.class_embedding = TimestepEmbedding(timestep_input_dim, time_embed_dim, act_fn=act_fn)
+        elif class_embed_type == "identity":
+            self.class_embedding = nn.Identity(time_embed_dim, time_embed_dim)
+        elif class_embed_type == "projection":
+---
 
 Orginal paper:
 https://arxiv.org/pdf/2006.11239
@@ -16,7 +32,7 @@ https://arxiv.org/pdf/1803.08494
 
 import torch
 import torch.nn as nn
-from typing import List
+from typing import List , Literal
 
 class SinusoidalEmbedding(nn.Module):
 
@@ -98,7 +114,7 @@ class ResidualBlock(nn.Module):
     def __init__(self, 
                  in_channels:int,
                  out_channels:int,
-                 time_embedding_norm:str,  ## additive or scale-shift/ FiLM
+                 time_embedding_norm:Literal["additive","film"],  ## additive or scale-shift/ FiLM
                  noise_embed_dim:int = 128,
                  n_groups:int = 32,
                  dropout:float = 0.0
@@ -181,7 +197,7 @@ class AttentionBlock(nn.Module):
 
         x = x.view(B, C, H * W).transpose(1, 2).contiguous()
 
-        x_attn, _ = self.attn(x, x, x, need_weights=False)
+        x_attn, _ = self.attn(x, x, x, need_weights=False) #Set ``need_weights=False`` to use the optimized ``scaled_dot_product_attention``
         
         x_attn = self.linear(x_attn)
 
@@ -289,9 +305,6 @@ class UpBlock(nn.Module):
                                                  n_groups,
                                                  dropout,
                                                  ))
-            # self.res_blocks.append(ResidualBlock(2*in_channels,in_channels,time_embedding_norm,noise_embed_dim))
-        
-            
         
         self.res_blocks.append(ResidualBlock(2*in_channels,
                                              out_channels,
@@ -334,6 +347,8 @@ class UNet(nn.Module):
     def __init__(self, 
                  in_channels:int, 
                  time_const:int,
+                 conditional:bool,
+                 n_classes:int,
                  time_embedding_norm:str = "additive",
                  block_depth:int = 2,
                  block_sizes:List[int] = [32,64,96],
@@ -349,6 +364,11 @@ class UNet(nn.Module):
         super().__init__()
         self.T = time_const
         self.noise_embed_dim = noise_embed_dim
+
+        if conditional:
+            self.class_embd = nn.Embedding(n_classes,noise_embed_dim)
+        else:
+            self.class_embd = False
         
         # 1) Get t ∈[0,T]        
         self.noise_pipeline = nn.Sequential(
@@ -409,9 +429,13 @@ class UNet(nn.Module):
 
         self.out_conv = nn.Conv2d(block_sizes[0],in_channels,kernel_size=3,padding=1)
         
-    def forward(self,img,noise_level):
+    def forward(self,img,noise_level:int,class_idx:int = 0):
 
         temb = self.noise_pipeline(noise_level)
+
+        if self.class_embd is not None:
+            temb += self.class_embd(class_idx)
+
         x = self.input_conv(img) 
 
         skips = []
@@ -430,6 +454,70 @@ class UNet(nn.Module):
         
         return x
 
+## TODO: Write this->
+class DiffusionModel:
+
+    def __init__(self,
+                 device:str,
+                 in_channels:int,
+                 time_const:int,
+                 conditional:bool,
+                 n_classes:int,
+                 time_embedding_norm:str = "additive",
+                 block_depth:int = 2,
+                 block_sizes:List[int] = [32,64,96],
+                 n_res_blocks:int = 2,
+                 noise_embed_dim:int = 128,
+                 n_groups:int = 32,
+                 n_attn_heads:int = 4,
+                 attn_levels:List[bool] = [False,True,True],
+                 norm_attn:bool = True,
+                 dropout:float = 0.0,
+                 beta_schedule:Literal["linear","cosine"] = "cosine",
+                 sched_min:float = 0.02,
+                 sched_max:float = 0.95,
+                 prediction_type:Literal["epsilon","sample","v_prediction"] = "epsilon", # https://medium.com/@zljdanceholic/three-stable-diffusion-training-losses-x0-epsilon-and-v-prediction-126de920eb73
+                 ema_beta:float = 0.9999,
+                 ):
+        
+        self.model = UNet(
+            in_channels,
+            time_const,
+            conditional,
+            n_classes,
+            time_embedding_norm,
+            block_depth,
+            block_sizes,
+            n_res_blocks,
+            noise_embed_dim,
+            n_groups,
+            n_attn_heads,
+            attn_levels,
+            norm_attn,
+            dropout,
+        ).to(device)
+
+        self.T = time_const
+        self.device = device
+
+        if beta_schedule == "linear":
+            
+            betas = torch.linspace(sched_min,sched_max,self.T, dtype=torch.float16,device=device)
+            alphas = torch.cumprod(1-betas,dim=0)
+            self.signal_rates = torch.sqrt(alphas)
+            self.noise_rates = torch.sqrt(1-alphas)
+        
+        elif beta_schedule == "cosine":
+            # TODO: Check why this formula is equivalent to the orginal one 
+            start_angle = torch.acos(sched_min)
+            end_angle = torch.acos(sched_max)
+            angles = torch.linspace(start_angle,end_angle,self.T, dtype=torch.float16,device=device)
+            self.signal_rates = torch.cos(angles)
+            self.noise_rates = torch.sin(angles)
+        
+        self.pred_type = prediction_type
+        self.ema_beta = ema_beta
+            
 
 model = UNet(
     in_channels=3,
@@ -439,7 +527,14 @@ model = UNet(
 print(model)
 total_params = sum(p.numel() for p in model.parameters())
 print(total_params)
-x = model(torch.zeros((10,3,64,64)),torch.zeros((10,1)))
+x = model(torch.zeros((10,3,32,32)),torch.zeros((10,1)))
+
+df = DiffusionModel("cuda",3,
+                    1000,
+                    conditional=True,
+                    n_classes=10,
+                    beta_schedule="linear",
+                    sched_max=1.0,sched_min=0)
 
 print(x.shape)
 

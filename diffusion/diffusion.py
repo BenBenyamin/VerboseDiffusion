@@ -31,6 +31,8 @@ https://arxiv.org/pdf/1803.08494
 """
 
 import torch
+from torch.optim.swa_utils import AveragedModel , get_ema_multi_avg_fn
+from torch.optim import AdamW
 import torch.nn as nn
 from typing import List , Literal
 
@@ -55,9 +57,11 @@ class SinusoidalEmbedding(nn.Module):
     
     def forward(self,x):
 
-        x/= self.T
+        x = x.float() / float(self.T)
 
-        embeddings = torch.concat([torch.sin(self.angular_speeds * x), torch.cos(self.angular_speeds * x)], dim=-1)
+        x = x[:,None]
+
+        embeddings = torch.concat([torch.sin(self.angular_speeds[None, :] * x), torch.cos(self.angular_speeds[None, :] * x)], dim=-1)
         return embeddings
 
 
@@ -139,7 +143,7 @@ class ResidualBlock(nn.Module):
         else:
             raise ValueError(f"Unkown time_embedding_norm, got {time_embedding_norm}, expected: 'additive',film")
 
-        self.activation = nn.SiLU(inplace=True)
+        self.activation = nn.SiLU()
 
         self.dropout = torch.nn.Dropout(dropout)
         
@@ -368,7 +372,7 @@ class UNet(nn.Module):
         if conditional:
             self.class_embd = nn.Embedding(n_classes,noise_embed_dim)
         else:
-            self.class_embd = False
+            self.class_embd = None
         
         # 1) Get t ∈[0,T]        
         self.noise_pipeline = nn.Sequential(
@@ -377,7 +381,7 @@ class UNet(nn.Module):
         # 3) Pass it through a MLP: embed_dim -> 4*embed_dim
         nn.Linear(self.noise_embed_dim,4*self.noise_embed_dim),
         # 4) Activation
-        nn.SiLU(inplace=True),
+        nn.SiLU(),
         # 5) 2nd MLP 4*self.noise_embed_dim->in_channels
         nn.Linear(4*self.noise_embed_dim,self.noise_embed_dim),
         )
@@ -429,11 +433,11 @@ class UNet(nn.Module):
 
         self.out_conv = nn.Conv2d(block_sizes[0],in_channels,kernel_size=3,padding=1)
         
-    def forward(self,img,noise_level:int,class_idx:int = 0):
+    def forward(self,img,noise_level:int,class_idx = None):
 
         temb = self.noise_pipeline(noise_level)
 
-        if self.class_embd is not None:
+        if self.class_embd is not None and class_idx is not None:
             temb += self.class_embd(class_idx)
 
         x = self.input_conv(img) 
@@ -477,32 +481,45 @@ class DiffusionModel:
                  sched_min:float = 0.02,
                  sched_max:float = 0.95,
                  prediction_type:Literal["epsilon","sample","v_prediction"] = "epsilon", # https://medium.com/@zljdanceholic/three-stable-diffusion-training-losses-x0-epsilon-and-v-prediction-126de920eb73
-                 ema_beta:float = 0.9999,
+                 ema_decay:float = 0.999,
+                 uncond_pred:bool = True,
                  ):
         
+        if uncond_pred:
+            n_classes +=1 # add null class 
+        
         self.model = UNet(
-            in_channels,
-            time_const,
-            conditional,
-            n_classes,
-            time_embedding_norm,
-            block_depth,
-            block_sizes,
-            n_res_blocks,
-            noise_embed_dim,
-            n_groups,
-            n_attn_heads,
-            attn_levels,
-            norm_attn,
-            dropout,
+                 in_channels, 
+                 time_const,
+                 conditional,
+                 n_classes,
+                 time_embedding_norm,
+                 block_depth,
+                 block_sizes,
+                 n_res_blocks,
+                 noise_embed_dim,
+                 n_groups,
+                 n_attn_heads,
+                 attn_levels,
+                 norm_attn,
+                 dropout,
         ).to(device)
+        
+        #Get a copy for the EMA
+        self.ema = AveragedModel(
+            self.model,
+            multi_avg_fn= get_ema_multi_avg_fn(ema_decay)
+            )
 
         self.T = time_const
         self.device = device
+        
+        sched_min = torch.tensor(sched_min, dtype=torch.float32)
+        sched_max = torch.tensor(sched_max, dtype=torch.float32)
 
         if beta_schedule == "linear":
             
-            betas = torch.linspace(sched_min,sched_max,self.T, dtype=torch.float16,device=device)
+            betas = torch.linspace(sched_min,sched_max,self.T, dtype=torch.float32,device=device)
             alphas = torch.cumprod(1-betas,dim=0)
             self.signal_rates = torch.sqrt(alphas)
             self.noise_rates = torch.sqrt(1-alphas)
@@ -511,32 +528,88 @@ class DiffusionModel:
             # TODO: Check why this formula is equivalent to the orginal one 
             start_angle = torch.acos(sched_min)
             end_angle = torch.acos(sched_max)
-            angles = torch.linspace(start_angle,end_angle,self.T, dtype=torch.float16,device=device)
+            angles = torch.linspace(start_angle,end_angle,self.T, dtype=torch.float32,device=device)
             self.signal_rates = torch.cos(angles)
             self.noise_rates = torch.sin(angles)
         
         self.pred_type = prediction_type
-        self.ema_beta = ema_beta
+        self.ema_decay = ema_decay
+        self.uncond_pred = uncond_pred
+
+        self.loss = nn.MSELoss(reduction="mean")
+
+    def train(self,epochs,train_dataloader,val_dataloader, lr = 0.001, uncond_prob:float = 0.1):
+        
+
+        optimizer = AdamW(self.model.parameters(), lr=lr)
+
+        for epoch in range(epochs):
+
+            self.model.train()
+
+            for batch_idx, (img, class_idx) in enumerate(train_dataloader):
+
+                batch_size = img.shape[0]
+
+                optimizer.zero_grad()
+                ts = torch.randint(0, self.T, size=(batch_size,), device=img.device)
+                epsilon = torch.randn_like(img)
+
+                nr = self.noise_rates[ts].view(batch_size, 1, 1, 1)
+                sr = self.signal_rates[ts].view(batch_size, 1, 1, 1)
+
+                noisy_img = sr * img + nr * epsilon
+
+                # mask random class indexes
+                if self.uncond_pred:
+                    class_idx +=1
+                    mask = torch.rand(batch_size, device=class_idx.device) < uncond_prob
+                    class_idx_input = class_idx.clone()
+                    class_idx_input[mask] = 0
+                else:
+                    class_idx_input = class_idx
+
+                model_output = self.model(noisy_img,ts,class_idx_input)
+
+                if self.pred_type == "epsilon":
+                    loss = self.loss(epsilon,model_output)
+                
+                if self.pred_type == "sample":
+                    loss = self.loss(img,model_output)
+                
+                if self.pred_type == "v_prediction":
+                    # https://arxiv.org/pdf/2102.09672
+                    v_target = sr * epsilon - nr * img
+                    loss = self.loss(v_target,model_output)
+                
+                loss.backward()
+                optimizer.step()
+
+                self.ema.update_parameters(self.model)
+
+                
+
+                
+
             
 
-model = UNet(
-    in_channels=3,
-    time_const= 1,
-    block_depth=2,
-)
-print(model)
-total_params = sum(p.numel() for p in model.parameters())
-print(total_params)
-x = model(torch.zeros((10,3,32,32)),torch.zeros((10,1)))
+# df = DiffusionModel("cpu",
+#                     3,
+#                     1000,
+#                     conditional=True,
+#                     n_classes=10,
+#                     beta_schedule="linear",
+#                     sched_max=1.0,sched_min=0)
 
-df = DiffusionModel("cuda",3,
-                    1000,
-                    conditional=True,
-                    n_classes=10,
-                    beta_schedule="linear",
-                    sched_max=1.0,sched_min=0)
 
-print(x.shape)
+# model = df.model
+# print(model.T)
+# total_params = sum(p.numel() for p in model.parameters())
+# print(f"{total_params:,}")
+# x = model(torch.zeros((10,3,32,32)),torch.zeros((10,1)),torch.zeros((10,),dtype=torch.int))
+
+
+# print(x.shape)
 
 
 

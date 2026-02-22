@@ -536,10 +536,19 @@ class DiffusionModel:
         self.ema_decay = ema_decay
         self.uncond_pred = uncond_pred
 
-        self.loss = nn.MSELoss(reduction="mean")
+        self.loss = nn.MSELoss(reduction="none")
 
-    def train(self,epochs,train_dataloader,val_dataloader, lr = 0.001, uncond_prob:float = 0.1):
+    def train(
+        self,
+        epochs,
+        train_dataloader,
+        val_dataloader,
+        lr = 0.001,
+        uncond_prob:float = 0.1,
+        grad_norm: float | None = 1.0,
+        ):
         
+        # TODO: 1) Add TensorBoard 2) add validation step 3) mixed precision
 
         optimizer = AdamW(self.model.parameters(), lr=lr)
 
@@ -571,25 +580,82 @@ class DiffusionModel:
 
                 model_output = self.model(noisy_img,ts,class_idx_input)
 
+                # TODO: Check why snr is needed
+                snr = (sr/nr)**2
+
                 if self.pred_type == "epsilon":
                     loss = self.loss(epsilon,model_output)
+                    weight = 1.0
                 
-                if self.pred_type == "sample":
+                elif self.pred_type == "sample":
                     loss = self.loss(img,model_output)
+                    weight = snr
                 
-                if self.pred_type == "v_prediction":
+                elif self.pred_type == "v_prediction":
                     # https://arxiv.org/pdf/2102.09672
                     v_target = sr * epsilon - nr * img
                     loss = self.loss(v_target,model_output)
+                    weight = snr/(snr+1)
                 
+                loss = (loss*weight).mean()
                 loss.backward()
+                if grad_norm is not None:
+                    nn.utils.clip_grad_norm_(self.model.parameters(), grad_norm)
                 optimizer.step()
 
                 self.ema.update_parameters(self.model)
 
+                val_loss = self.validate()
+    
+    @torch.no_grad()
+    def validate(self, val_dataloader):
+        
+        running_loss = 0
+        examples = 0
+        
+        self.model.eval()
+
+        for batch_idx, (img, class_idx) in enumerate(val_dataloader):
                 
+                batch_size = img.shape[0]
 
                 
+                ts = torch.randint(0, self.T, size=(batch_size,), device=img.device)
+                epsilon = torch.randn_like(img)
+
+                nr = self.noise_rates[ts].view(batch_size, 1, 1, 1)
+                sr = self.signal_rates[ts].view(batch_size, 1, 1, 1)
+
+                noisy_img = sr * img + nr * epsilon
+
+                model_output = self.model(noisy_img,ts,class_idx)
+
+                snr = (sr/nr)**2
+
+                if self.pred_type == "epsilon":
+                    loss = self.loss(epsilon,model_output)
+                    weight = 1.0
+                
+                elif self.pred_type == "sample":
+                    loss = self.loss(img,model_output)
+                    weight = snr
+                
+                elif self.pred_type == "v_prediction":
+                    # https://arxiv.org/pdf/2102.09672
+                    v_target = sr * epsilon - nr * img
+                    loss = self.loss(v_target,model_output)
+                    weight = snr/(snr+1)
+                
+                loss = (loss*weight).mean()
+                
+                running_loss += loss.item()*batch_size
+                examples += batch_size
+        
+        self.model.train()
+        return running_loss/examples
+
+
+
 
             
 

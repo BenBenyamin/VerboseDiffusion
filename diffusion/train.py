@@ -91,4 +91,5 @@ df.train(
     val_dataloader = val_loader,
     lr = params["lr"],
     uncond_prob = params["uncond_prob"],
+    grad_norm = params["grad_norm"],
 )

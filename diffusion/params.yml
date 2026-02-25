@@ -1,0 +1,44 @@
+# Model and training configuration
+device: "cuda"
+batch_size: 64
+num_workers: 4
+lr: 0.001
+grad_norm: 1.0
+
+# UNet architecture
+in_channels: 3
+time_const: 1000
+conditional: true
+time_embedding_norm: "additive"
+
+block_depth: 2
+block_sizes:
+  - 32
+  - 64
+  - 96
+
+n_res_blocks: 2
+noise_embed_dim: 128
+n_attn_heads: 4
+attn_levels:
+  - false
+  - true
+  - true
+
+n_groups: 32
+norm_attn: true
+dropout: 0.0
+
+# Diffusion schedule
+beta_schedule: "cosine"
+sched_min: 0.02
+sched_max: 0.95
+
+# Prediction type
+prediction_type: "epsilon"
+
+# EMA
+ema_decay: 0.999
+
+uncond_pred: true
+uncond_prob: 0.1

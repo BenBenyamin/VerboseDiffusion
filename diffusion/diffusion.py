@@ -36,6 +36,8 @@ from torch.optim import AdamW
 import torch.nn as nn
 from typing import List , Literal
 
+from torch.utils.tensorboard import SummaryWriter
+
 class SinusoidalEmbedding(nn.Module):
 
     def __init__(self, 
@@ -482,11 +484,13 @@ class DiffusionModel:
                  sched_max:float = 0.95,
                  prediction_type:Literal["epsilon","sample","v_prediction"] = "epsilon", # https://medium.com/@zljdanceholic/three-stable-diffusion-training-losses-x0-epsilon-and-v-prediction-126de920eb73
                  ema_decay:float = 0.999,
-                 uncond_pred:bool = True,
+                 cond_pred:bool = True,
                  ):
         
-        if uncond_pred:
-            n_classes +=1 # add null class 
+        if cond_pred:
+            n_classes +=1 # add null class
+        
+        
         
         self.model = UNet(
                  in_channels, 
@@ -504,7 +508,10 @@ class DiffusionModel:
                  norm_attn,
                  dropout,
         ).to(device)
-        
+
+        self.n_classes = n_classes
+        self.in_channels = in_channels
+
         #Get a copy for the EMA
         self.ema = AveragedModel(
             self.model,
@@ -534,7 +541,7 @@ class DiffusionModel:
         
         self.pred_type = prediction_type
         self.ema_decay = ema_decay
-        self.uncond_pred = uncond_pred
+        self.cond_pred = cond_pred
 
         self.loss = nn.MSELoss(reduction="none")
 
@@ -546,13 +553,22 @@ class DiffusionModel:
         lr = 0.001,
         uncond_prob:float = 0.1,
         grad_norm: float | None = 1.0,
+        log_dir:str = "./runs/",
+        log_every:int = 20,
         ):
         
         # TODO: 1) Add TensorBoard 2) add validation step 3) mixed precision
 
         optimizer = AdamW(self.model.parameters(), lr=lr)
 
+        self.writer = SummaryWriter(log_dir)
+
+        log_cnt = 0
+
         for epoch in range(epochs):
+
+            running_loss = 0
+            n_examples = 0
 
             self.model.train()
 
@@ -570,7 +586,7 @@ class DiffusionModel:
                 noisy_img = sr * img + nr * epsilon
 
                 # mask random class indexes
-                if self.uncond_pred:
+                if self.cond_pred:
                     class_idx +=1
                     mask = torch.rand(batch_size, device=class_idx.device) < uncond_prob
                     class_idx_input = class_idx.clone()
@@ -605,21 +621,34 @@ class DiffusionModel:
 
                 self.ema.update_parameters(self.model)
 
-                val_loss = self.validate()
+                running_loss += loss.item()*batch_size
+                n_examples += batch_size
+
+            log_cnt +=1
+            if log_cnt == log_every:
+                log_cnt = 0
+                self._log_metrics(epoch,running_loss/n_examples,val_dataloader)
+
     
-    @torch.no_grad()
-    def validate(self, val_dataloader):
+    @torch.inference_mode()
+    def validate(self, val_dataloader , mode:Literal["raw","ema"]):
         
         running_loss = 0
-        examples = 0
+        n_examples = 0
         
-        self.model.eval()
+        if mode == "raw":
+            model = self.model
+            
+        elif mode == "ema":
+            model = self.ema.module
+
+        model.eval()
+
 
         for batch_idx, (img, class_idx) in enumerate(val_dataloader):
                 
                 batch_size = img.shape[0]
 
-                
                 ts = torch.randint(0, self.T, size=(batch_size,), device=img.device)
                 epsilon = torch.randn_like(img)
 
@@ -628,7 +657,10 @@ class DiffusionModel:
 
                 noisy_img = sr * img + nr * epsilon
 
-                model_output = self.model(noisy_img,ts,class_idx)
+                if self.cond_pred:
+                    class_idx +=1
+
+                model_output = model(noisy_img,ts,class_idx)
 
                 snr = (sr/nr)**2
 
@@ -649,10 +681,94 @@ class DiffusionModel:
                 loss = (loss*weight).mean()
                 
                 running_loss += loss.item()*batch_size
-                examples += batch_size
+                n_examples += batch_size
         
-        self.model.train()
-        return running_loss/examples
+        if mode == "raw":
+            self.model.train()
+        return running_loss/n_examples
+
+    ## TODO: Write this
+    def sample(self,
+               n_samples:int, 
+               shape: tuple, 
+               class_labels = None, 
+               added_noise_weight:float = 0.0, 
+               guidance_scale:float = 1.0
+               ):
+        
+        #generate the noise
+        
+        device = next(self.model.parameters()).device
+
+        size = (n_samples,self.in_channels,*shape)
+
+        x_t = torch.randn(size, device=device)
+
+        if class_labels is None and self.cond_pred:
+            
+            class_labels = torch.randint(0, self.n_classes, (n_samples,), device=device)
+
+        if self.cond_pred:
+            class_labels +=1
+        
+
+        for t in reversed(range(1,self.T)):
+            
+            ts = torch.full((n_samples,), t, device=device, dtype=torch.long)
+            
+            nr = self.noise_rates[ts].view(n_samples,1,1,1)
+            sr = self.signal_rates[ts].view(n_samples,1,1,1)
+
+            # use CFG?
+            if self.cond_pred and (guidance_scale is not None) and (guidance_scale != 1.0):
+                uncond_labels = torch.zeros_like(class_labels)  # 0 is your unconditional token
+                out_uncond = self.ema.module(x_t, ts, class_idx=uncond_labels)
+                out_cond   = self.ema.module(x_t, ts, class_idx=class_labels)
+                model_out  = out_uncond + guidance_scale * (out_cond - out_uncond)
+            else:
+                model_out  = self.ema.module(x_t, ts, class_idx=class_labels)
+            
+
+            if self.pred_type == "epsilon":
+
+                pred_eps = model_out
+                x_0 = (x_t-nr*pred_eps)/sr
+            
+            elif self.pred_type == "sample":
+
+                x_0 = model_out
+                pred_eps = (x_t - x_0*sr)/nr
+            
+            elif self.pred_type == "v_prediction":
+
+                v_pred = model_out 
+                
+                # v_target = sr * epsilon - nr * x_0
+                pred_eps = sr * v_pred + nr * x_t
+                x_0 = sr * x_t - nr * v_pred
+            
+            # sr = sqrt(alpha_t), nr = sqrt(1- alpha_t)
+            prev_sr = self.signal_rates[ts-1].view(n_samples,1,1,1)
+            prev_nr = self.noise_rates[ts-1].view(n_samples,1,1,1)
+            
+            # https://arxiv.org/pdf/2010.02502#page=6 eq 16 , added_noise_weight = eta
+            sigma_t = added_noise_weight * (prev_nr / nr) * torch.sqrt(1 - sr**2/prev_sr**2)
+
+            x_t = prev_sr * x_0 + torch.sqrt(1 - prev_sr**2 - sigma_t**2) * pred_eps + sigma_t * torch.randn_like(x_t)
+                
+            
+
+    @torch.inference_mode()
+    def _log_metrics(self, epoch, train_loss , val_dataloader):
+        
+        val_loss = self.validate(val_dataloader,mode = "raw")
+        ema_val_loss = self.validate(val_dataloader,mode = "ema")
+
+        self.writer.add_scalar("Loss/train",train_loss,global_step=epoch)
+        self.writer.add_scalar("Loss/val",val_loss,global_step=epoch)
+        self.writer.add_scalar("Loss/ema_val",ema_val_loss,global_step=epoch)
+    
+
 
 
 

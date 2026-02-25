@@ -34,13 +34,16 @@ import torch
 from torch.optim.swa_utils import AveragedModel , get_ema_multi_avg_fn
 from torch.optim import AdamW
 import torch.nn as nn
+
 from typing import List , Literal
 
 from torch.utils.tensorboard import SummaryWriter
+from torchvision.utils import make_grid
 
 class SinusoidalEmbedding(nn.Module):
 
-    def __init__(self, 
+    def __init__(self,
+                 device:str,
                  noise_embedding_size:int,
                  n_timesteps:int,
                  min_freq:float = 1.0,
@@ -48,13 +51,13 @@ class SinusoidalEmbedding(nn.Module):
                  ):
         super().__init__()
 
-        min_freq = torch.log10(torch.tensor(min_freq,dtype=torch.float16))
-        max_freq = torch.log10(torch.tensor(max_freq,dtype=torch.float16))
+        min_freq = torch.log10(torch.tensor(min_freq,dtype=torch.float16,device=device))
+        max_freq = torch.log10(torch.tensor(max_freq,dtype=torch.float16,device=device))
 
         self.embed_size = noise_embedding_size
         self.T = n_timesteps
 
-        frequencies = torch.pow(10,torch.linspace(min_freq,max_freq , self.embed_size // 2))
+        frequencies = torch.pow(10,torch.linspace(min_freq,max_freq , self.embed_size // 2)).to(device)
         self.angular_speeds = 2.0 * torch.pi * frequencies
     
     def forward(self,x):
@@ -350,7 +353,8 @@ class UpBlock(nn.Module):
 
 class UNet(nn.Module):
 
-    def __init__(self, 
+    def __init__(self,
+                 device:str,
                  in_channels:int, 
                  time_const:int,
                  conditional:bool,
@@ -371,6 +375,8 @@ class UNet(nn.Module):
         self.T = time_const
         self.noise_embed_dim = noise_embed_dim
 
+        self.device = device
+
         if conditional:
             self.class_embd = nn.Embedding(n_classes,noise_embed_dim)
         else:
@@ -379,7 +385,7 @@ class UNet(nn.Module):
         # 1) Get t ∈[0,T]        
         self.noise_pipeline = nn.Sequential(
         # 2) Do sin embedding to get a vector of size embed_dim
-        SinusoidalEmbedding(noise_embed_dim,time_const),
+        SinusoidalEmbedding(self.device, noise_embed_dim,time_const),
         # 3) Pass it through a MLP: embed_dim -> 4*embed_dim
         nn.Linear(self.noise_embed_dim,4*self.noise_embed_dim),
         # 4) Activation
@@ -485,14 +491,11 @@ class DiffusionModel:
                  prediction_type:Literal["epsilon","sample","v_prediction"] = "epsilon", # https://medium.com/@zljdanceholic/three-stable-diffusion-training-losses-x0-epsilon-and-v-prediction-126de920eb73
                  ema_decay:float = 0.999,
                  cond_pred:bool = True,
-                 ):
-        
-        if cond_pred:
-            n_classes +=1 # add null class
-        
+                 ):    
         
         
         self.model = UNet(
+                 device,
                  in_channels, 
                  time_const,
                  conditional,
@@ -510,6 +513,9 @@ class DiffusionModel:
         ).to(device)
 
         self.n_classes = n_classes
+        if cond_pred:
+            self.n_classes +=1 # add null class
+
         self.in_channels = in_channels
 
         #Get a copy for the EMA
@@ -557,7 +563,7 @@ class DiffusionModel:
         log_every:int = 20,
         ):
         
-        # TODO: 1) Add TensorBoard 2) add validation step 3) mixed precision
+        # TODO: 1) Add mixed precision
 
         optimizer = AdamW(self.model.parameters(), lr=lr)
 
@@ -627,7 +633,7 @@ class DiffusionModel:
             log_cnt +=1
             if log_cnt == log_every:
                 log_cnt = 0
-                self._log_metrics(epoch,running_loss/n_examples,val_dataloader)
+                self._log_metrics(epoch,running_loss/n_examples,val_dataloader,img.shape[2:])
 
     
     @torch.inference_mode()
@@ -686,8 +692,8 @@ class DiffusionModel:
         if mode == "raw":
             self.model.train()
         return running_loss/n_examples
-
-    ## TODO: Write this
+    
+    @torch.inference_mode()
     def sample(self,
                n_samples:int, 
                shape: tuple, 
@@ -697,6 +703,8 @@ class DiffusionModel:
                ):
         
         #generate the noise
+
+        self.ema.module.eval()
         
         device = next(self.model.parameters()).device
 
@@ -708,8 +716,6 @@ class DiffusionModel:
             
             class_labels = torch.randint(0, self.n_classes, (n_samples,), device=device)
 
-        if self.cond_pred:
-            class_labels +=1
         
 
         for t in reversed(range(1,self.T)):
@@ -720,7 +726,7 @@ class DiffusionModel:
             sr = self.signal_rates[ts].view(n_samples,1,1,1)
 
             # use CFG?
-            if self.cond_pred and (guidance_scale is not None) and (guidance_scale != 1.0):
+            if self.cond_pred and guidance_scale != 1.0:
                 uncond_labels = torch.zeros_like(class_labels)  # 0 is your unconditional token
                 out_uncond = self.ema.module(x_t, ts, class_idx=uncond_labels)
                 out_cond   = self.ema.module(x_t, ts, class_idx=class_labels)
@@ -755,11 +761,13 @@ class DiffusionModel:
             sigma_t = added_noise_weight * (prev_nr / nr) * torch.sqrt(1 - sr**2/prev_sr**2)
 
             x_t = prev_sr * x_0 + torch.sqrt(1 - prev_sr**2 - sigma_t**2) * pred_eps + sigma_t * torch.randn_like(x_t)
-                
+
+        x_0 = (x_t.clamp(-1,1) + 1) / 2  # normalize to [0,1]
+        return x_0
             
 
     @torch.inference_mode()
-    def _log_metrics(self, epoch, train_loss , val_dataloader):
+    def _log_metrics(self, epoch, train_loss , val_dataloader, shape):
         
         val_loss = self.validate(val_dataloader,mode = "raw")
         ema_val_loss = self.validate(val_dataloader,mode = "ema")
@@ -767,23 +775,38 @@ class DiffusionModel:
         self.writer.add_scalar("Loss/train",train_loss,global_step=epoch)
         self.writer.add_scalar("Loss/val",val_loss,global_step=epoch)
         self.writer.add_scalar("Loss/ema_val",ema_val_loss,global_step=epoch)
-    
 
 
+        # Set the seed in this particular instance
+        with torch.random.fork_rng(enabled=True):
+            torch.manual_seed(0)
 
+            samples = self.sample(
+                n_samples=self.n_classes,
+                shape=shape,
+                class_labels=torch.arange(self.n_classes, device=self.device, dtype=torch.long),
+                added_noise_weight=0.0,
+                guidance_scale=1.0,
+            )
+        self.writer.add_image(
+            "Samples",
+            make_grid(samples,nrow=self.n_classes),
+            global_step=epoch,
+                        )
 
+  
 
-            
+df = DiffusionModel("cuda",
+                    3,
+                    1000,
+                    conditional=True,
+                    n_classes=10,
+                    beta_schedule="linear",
+                    sched_max=1.0,sched_min=0)
 
-# df = DiffusionModel("cpu",
-#                     3,
-#                     1000,
-#                     conditional=True,
-#                     n_classes=10,
-#                     beta_schedule="linear",
-#                     sched_max=1.0,sched_min=0)
+x = df.sample(10,(32,32),class_labels=torch.arange(10, dtype=torch.long,device="cuda"),guidance_scale=1.1).to("cuda")
 
-
+print(x.shape)
 # model = df.model
 # print(model.T)
 # total_params = sum(p.numel() for p in model.parameters())

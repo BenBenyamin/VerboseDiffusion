@@ -60,7 +60,7 @@ val_loader = DataLoader(
 n_classes = len(train_loader.dataset.classes)
 
 # Create the diffusion model
-df = DiffusionModel(
+dfm = DiffusionModel(
     device=params["device"],
     in_channels=params["in_channels"],
     time_const=params["time_const"],
@@ -85,11 +85,55 @@ df = DiffusionModel(
 # x = df.model(torch.zeros((10,3,32,32)),torch.zeros((10,1)),torch.zeros((10,),dtype=torch.int))
 # print(x.shape)
 
-df.train(
-    epochs = 10,
+label_names = train_dataset.classes
+
+print(label_names)
+# dfm.load("./ckpts/test.pt")
+
+dfm.train(
+    steps = 200_000,
     train_dataloader = train_loader,
     val_dataloader = val_loader,
     lr = params["lr"],
     uncond_prob = params["uncond_prob"],
     grad_norm = params["grad_norm"],
+    log_every = 10_000,
 )
+
+dfm.save("./ckpts/bigger.pt")
+
+# x = dfm.generate(
+#     [6]*5,
+#     (32,32),
+#     1.0,
+# )
+
+# import matplotlib.pyplot as plt
+# import math
+
+# # x is (N, 3, H, W)
+# x = x.detach().cpu()
+# N = x.shape[0]
+
+# cols = min(N, 4)
+# rows = math.ceil(N / cols)
+
+# fig, axes = plt.subplots(rows, cols, figsize=(4*cols, 4*rows))
+
+# # Make axes always iterable
+# if N == 1:
+#     axes = [axes]
+# else:
+#     axes = axes.flatten()
+
+# for i in range(N):
+#     img = x[i].permute(1, 2, 0)  # (H, W, 3)
+#     axes[i].imshow(img)
+#     axes[i].axis("off")
+
+# # Hide extra axes
+# for i in range(N, len(axes)):
+#     axes[i].axis("off")
+
+# plt.tight_layout()
+# plt.show()

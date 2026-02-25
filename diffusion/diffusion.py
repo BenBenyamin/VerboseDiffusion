@@ -35,6 +35,8 @@ from torch.optim.swa_utils import AveragedModel , get_ema_multi_avg_fn
 from torch.optim import AdamW
 import torch.nn as nn
 
+import os
+
 from typing import List , Literal
 
 from torch.utils.tensorboard import SummaryWriter
@@ -494,6 +496,9 @@ class DiffusionModel:
                  ):    
         
         
+        if cond_pred:
+            n_classes +=1 # add null class
+
         self.model = UNet(
                  device,
                  in_channels, 
@@ -513,8 +518,6 @@ class DiffusionModel:
         ).to(device)
 
         self.n_classes = n_classes
-        if cond_pred:
-            self.n_classes +=1 # add null class
 
         self.in_channels = in_channels
 
@@ -538,9 +541,10 @@ class DiffusionModel:
             self.noise_rates = torch.sqrt(1-alphas)
         
         elif beta_schedule == "cosine":
-            # TODO: Check why this formula is equivalent to the orginal one 
-            start_angle = torch.acos(sched_min)
-            end_angle = torch.acos(sched_max)
+            # TODO: Check why this formula is equivalent to the orginal one
+            # And why is it flipped with the angles 
+            start_angle = torch.acos(sched_max)
+            end_angle = torch.acos(sched_min)
             angles = torch.linspace(start_angle,end_angle,self.T, dtype=torch.float32,device=device)
             self.signal_rates = torch.cos(angles)
             self.noise_rates = torch.sin(angles)
@@ -553,25 +557,26 @@ class DiffusionModel:
 
     def train(
         self,
-        epochs,
+        steps,
         train_dataloader,
         val_dataloader,
         lr = 0.001,
         uncond_prob:float = 0.1,
         grad_norm: float | None = 1.0,
         log_dir:str = "./runs/",
-        log_every:int = 20,
+        log_every:int = 10_000,
         ):
         
         # TODO: 1) Add mixed precision
 
         optimizer = AdamW(self.model.parameters(), lr=lr)
+        scaler = torch.amp.GradScaler("cuda")
 
         self.writer = SummaryWriter(log_dir)
 
-        log_cnt = 0
+        steps_cnt = 0
 
-        for epoch in range(epochs):
+        while True:
 
             running_loss = 0
             n_examples = 0
@@ -583,6 +588,8 @@ class DiffusionModel:
                 batch_size = img.shape[0]
 
                 optimizer.zero_grad()
+                img = img.to(self.device)
+                class_idx = class_idx.to(self.device)
                 ts = torch.randint(0, self.T, size=(batch_size,), device=img.device)
                 epsilon = torch.randn_like(img)
 
@@ -600,40 +607,49 @@ class DiffusionModel:
                 else:
                     class_idx_input = class_idx
 
-                model_output = self.model(noisy_img,ts,class_idx_input)
+                with torch.autocast("cuda", dtype=torch.float16):
 
-                # TODO: Check why snr is needed
-                snr = (sr/nr)**2
+                    model_output = self.model(noisy_img,ts,class_idx_input)
 
-                if self.pred_type == "epsilon":
-                    loss = self.loss(epsilon,model_output)
-                    weight = 1.0
+                    # TODO: Check why snr is needed
+                    snr = (sr/nr)**2
+                    if self.pred_type == "epsilon":
+                        loss = self.loss(epsilon,model_output)
+                        weight = 1.0
+                    
+                    elif self.pred_type == "sample":
+                        loss = self.loss(img,model_output)
+                        weight = snr
+                    
+                    elif self.pred_type == "v_prediction":
+                        # https://arxiv.org/pdf/2102.09672
+                        v_target = sr * epsilon - nr * img
+                        loss = self.loss(v_target,model_output)
+                        weight = snr/(snr+1)
                 
-                elif self.pred_type == "sample":
-                    loss = self.loss(img,model_output)
-                    weight = snr
                 
-                elif self.pred_type == "v_prediction":
-                    # https://arxiv.org/pdf/2102.09672
-                    v_target = sr * epsilon - nr * img
-                    loss = self.loss(v_target,model_output)
-                    weight = snr/(snr+1)
-                
-                loss = (loss*weight).mean()
-                loss.backward()
+                loss = (loss * weight).mean()
+
+                scaler.scale(loss).backward()
+
                 if grad_norm is not None:
+                    scaler.unscale_(optimizer)
                     nn.utils.clip_grad_norm_(self.model.parameters(), grad_norm)
-                optimizer.step()
+
+                scaler.step(optimizer)
+                scaler.update()
 
                 self.ema.update_parameters(self.model)
 
                 running_loss += loss.item()*batch_size
                 n_examples += batch_size
-
-            log_cnt +=1
-            if log_cnt == log_every:
-                log_cnt = 0
-                self._log_metrics(epoch,running_loss/n_examples,val_dataloader,img.shape[2:])
+                steps_cnt +=1
+            
+                if steps_cnt % log_every == 0:
+                    self._log_metrics(steps_cnt,running_loss/n_examples,val_dataloader,img.shape[2:])
+                
+                if steps_cnt >= steps:
+                    return # Stop training
 
     
     @torch.inference_mode()
@@ -655,6 +671,9 @@ class DiffusionModel:
                 
                 batch_size = img.shape[0]
 
+                img = img.to(self.device)
+                class_idx = class_idx.to(self.device)
+
                 ts = torch.randint(0, self.T, size=(batch_size,), device=img.device)
                 epsilon = torch.randn_like(img)
 
@@ -663,8 +682,8 @@ class DiffusionModel:
 
                 noisy_img = sr * img + nr * epsilon
 
-                if self.cond_pred:
-                    class_idx +=1
+                # if self.cond_pred:
+                #     class_idx +=1
 
                 model_output = model(noisy_img,ts,class_idx)
 
@@ -716,7 +735,8 @@ class DiffusionModel:
             
             class_labels = torch.randint(0, self.n_classes, (n_samples,), device=device)
 
-        
+        # if self.cond_pred:
+        #     class_labels +=1
 
         for t in reversed(range(1,self.T)):
             
@@ -758,11 +778,11 @@ class DiffusionModel:
             prev_nr = self.noise_rates[ts-1].view(n_samples,1,1,1)
             
             # https://arxiv.org/pdf/2010.02502#page=6 eq 16 , added_noise_weight = eta
-            sigma_t = added_noise_weight * (prev_nr / nr) * torch.sqrt(1 - sr**2/prev_sr**2)
+            sigma_t = added_noise_weight * (prev_nr / nr) * torch.sqrt(torch.abs(1 - sr**2/prev_sr**2))
 
             x_t = prev_sr * x_0 + torch.sqrt(1 - prev_sr**2 - sigma_t**2) * pred_eps + sigma_t * torch.randn_like(x_t)
 
-        x_0 = (x_t.clamp(-1,1) + 1) / 2  # normalize to [0,1]
+        x_0 = (x_0.clamp(-1,1) + 1) / 2  # normalize to [0,1]
         return x_0
             
 
@@ -788,25 +808,51 @@ class DiffusionModel:
                 added_noise_weight=0.0,
                 guidance_scale=1.0,
             )
+
         self.writer.add_image(
             "Samples",
             make_grid(samples,nrow=self.n_classes),
             global_step=epoch,
                         )
+    
+    def generate(self, class_idx:List, shape: tuple, guidance_scale:float = 1.0):
+
+        class_labels = torch.tensor(class_idx,dtype=torch.long,device=self.device)
+        return self.sample(
+            n_samples=len(class_idx),
+            shape=shape,
+            class_labels=class_labels,
+            guidance_scale=guidance_scale
+        )
+
+    def save(self, path: str):
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        torch.save(
+            {
+                "model": self.model.state_dict(),
+                "ema": self.ema.module.state_dict(),
+            },
+            path,
+        )
+
+    def load(self, path: str, map_location=None):
+        ckpt = torch.load(path, map_location=map_location)
+        self.model.load_state_dict(ckpt["model"])
+        self.ema.module.load_state_dict(ckpt["ema"])
 
   
 
-df = DiffusionModel("cuda",
-                    3,
-                    1000,
-                    conditional=True,
-                    n_classes=10,
-                    beta_schedule="linear",
-                    sched_max=1.0,sched_min=0)
+# df = DiffusionModel("cuda",
+#                     3,
+#                     1000,
+#                     conditional=True,
+#                     n_classes=10,
+#                     beta_schedule="linear",
+#                     sched_max=1.0,sched_min=0)
 
-x = df.sample(10,(32,32),class_labels=torch.arange(10, dtype=torch.long,device="cuda"),guidance_scale=1.1).to("cuda")
+# x = df.sample(10,(32,32),class_labels=torch.arange(10, dtype=torch.long,device="cuda"),guidance_scale=1.1).to("cuda")
 
-print(x.shape)
+# print(x.shape)
 # model = df.model
 # print(model.T)
 # total_params = sum(p.numel() for p in model.parameters())

@@ -88,52 +88,52 @@ dfm = DiffusionModel(
 label_names = train_dataset.classes
 
 print(label_names)
-# dfm.load("./ckpts/test.pt")
 
-dfm.train(
-    steps = 200_000,
-    train_dataloader = train_loader,
-    val_dataloader = val_loader,
-    lr = params["lr"],
-    uncond_prob = params["uncond_prob"],
-    grad_norm = params["grad_norm"],
-    log_every = 10_000,
-)
-
-dfm.save("./ckpts/bigger.pt")
-
-# x = dfm.generate(
-#     [6]*5,
-#     (32,32),
-#     1.0,
+# dfm.train(
+#     steps = 200_000,
+#     train_dataloader = train_loader,
+#     val_dataloader = val_loader,
+#     lr = params["lr"],
+#     uncond_prob = params["uncond_prob"],
+#     grad_norm = params["grad_norm"],
+#     log_every = 10_000,
 # )
 
-# import matplotlib.pyplot as plt
-# import math
+dfm.load("./ckpts/bigger.pt")
 
-# # x is (N, 3, H, W)
-# x = x.detach().cpu()
-# N = x.shape[0]
+x = dfm.generate(
+    [6]*20,
+    (32,32),
+    5.0,
+    seed = 0,
+)
 
-# cols = min(N, 4)
-# rows = math.ceil(N / cols)
+import matplotlib.pyplot as plt
+import math
 
-# fig, axes = plt.subplots(rows, cols, figsize=(4*cols, 4*rows))
+# x is (N, 3, H, W)
+x = x.detach().cpu()
+N = x.shape[0]
 
-# # Make axes always iterable
-# if N == 1:
-#     axes = [axes]
-# else:
-#     axes = axes.flatten()
+cols = min(N, 4)
+rows = math.ceil(N / cols)
 
-# for i in range(N):
-#     img = x[i].permute(1, 2, 0)  # (H, W, 3)
-#     axes[i].imshow(img)
-#     axes[i].axis("off")
+fig, axes = plt.subplots(rows, cols, figsize=(4*cols, 4*rows))
 
-# # Hide extra axes
-# for i in range(N, len(axes)):
-#     axes[i].axis("off")
+# Make axes always iterable
+if N == 1:
+    axes = [axes]
+else:
+    axes = axes.flatten()
 
-# plt.tight_layout()
-# plt.show()
+for i in range(N):
+    img = x[i].permute(1, 2, 0)  # (H, W, 3)
+    axes[i].imshow(img)
+    axes[i].axis("off")
+
+# Hide extra axes
+for i in range(N, len(axes)):
+    axes[i].axis("off")
+
+plt.tight_layout()
+plt.show()

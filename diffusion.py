@@ -223,7 +223,7 @@ class DownBlock(nn.Module):
                  in_channels:int,
                  out_channels:int,
                  depth:int,
-                 time_embedding_norm:str,
+                 time_embedding_norm:Literal["additive","film"],
                  noise_embed_dim:int,
                  n_groups:int = 32,
                  num_heads:int = 0,
@@ -291,7 +291,7 @@ class UpBlock(nn.Module):
     def __init__(self, in_channels:int,
                  out_channels:int,
                  depth:int,
-                 time_embedding_norm:str,
+                 time_embedding_norm:Literal["additive","film"],
                  noise_embed_dim:int,
                  n_groups:int = 32,
                  num_heads:int = 0,
@@ -361,7 +361,7 @@ class UNet(nn.Module):
                  time_const:int,
                  conditional:bool,
                  n_classes:int,
-                 time_embedding_norm:str = "additive",
+                 time_embedding_norm:Literal["additive","film"] = "additive",
                  block_depth:int = 2,
                  block_sizes:List[int] = [32,64,96],
                  n_res_blocks:int = 2,
@@ -402,7 +402,8 @@ class UNet(nn.Module):
                 DownBlock(
                     block_sizes[i],
                     block_sizes[i+1],
-                    block_depth,time_embedding_norm,
+                    block_depth,
+                    time_embedding_norm,
                     noise_embed_dim,
                     n_groups,
                     norm=norm_attn,
@@ -468,7 +469,6 @@ class UNet(nn.Module):
         
         return x
 
-## TODO: Write this->
 class DiffusionModel:
 
     def __init__(self,
@@ -477,7 +477,7 @@ class DiffusionModel:
                  time_const:int,
                  conditional:bool,
                  n_classes:int,
-                 time_embedding_norm:str = "additive",
+                 time_embedding_norm:Literal["additive","film"] = "additive",
                  block_depth:int = 2,
                  block_sizes:List[int] = [32,64,96],
                  n_res_blocks:int = 2,
@@ -560,15 +560,13 @@ class DiffusionModel:
         steps,
         train_dataloader,
         val_dataloader,
-        lr = 0.001,
+        lr = 0.0001,
         uncond_prob:float = 0.1,
         grad_norm: float | None = 1.0,
         log_dir:str = "./runs/",
         log_every:int = 10_000,
         ):
         
-        # TODO: 1) Add mixed precision
-
         optimizer = AdamW(self.model.parameters(), lr=lr)
         scaler = torch.amp.GradScaler("cuda")
 
@@ -682,8 +680,6 @@ class DiffusionModel:
 
                 noisy_img = sr * img + nr * epsilon
 
-                # if self.cond_pred:
-                #     class_idx +=1
 
                 model_output = model(noisy_img,ts,class_idx)
 
@@ -735,8 +731,6 @@ class DiffusionModel:
             
             class_labels = torch.randint(0, self.n_classes, (n_samples,), device=device)
 
-        # if self.cond_pred:
-        #     class_labels +=1
 
         for t in reversed(range(1,self.T)):
             
@@ -815,15 +809,23 @@ class DiffusionModel:
             global_step=epoch,
                         )
     
-    def generate(self, class_idx:List, shape: tuple, guidance_scale:float = 1.0):
+    def generate(self, 
+                 class_idx:List, 
+                 shape: tuple, 
+                 guidance_scale:float = 1.0,
+                 seed:int = 0,
+                 ):
 
-        class_labels = torch.tensor(class_idx,dtype=torch.long,device=self.device)
-        return self.sample(
-            n_samples=len(class_idx),
-            shape=shape,
-            class_labels=class_labels,
-            guidance_scale=guidance_scale
-        )
+        with torch.random.fork_rng(enabled=True):
+            torch.manual_seed(seed)
+
+            class_labels = torch.tensor(class_idx,dtype=torch.long,device=self.device) +1
+            return self.sample(
+                n_samples=len(class_idx),
+                shape=shape,
+                class_labels=class_labels,
+                guidance_scale=guidance_scale
+            )
 
     def save(self, path: str):
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -840,28 +842,57 @@ class DiffusionModel:
         self.model.load_state_dict(ckpt["model"])
         self.ema.module.load_state_dict(ckpt["ema"])
 
-  
 
-# df = DiffusionModel("cuda",
-#                     3,
-#                     1000,
-#                     conditional=True,
-#                     n_classes=10,
-#                     beta_schedule="linear",
-#                     sched_max=1.0,sched_min=0)
+## TODO: Use AutoencoderKL from diffusers to load a VAE
+##  1) Get latent channels: AutoencoderKL.config.latent_channels
+##  2) Use them instead of in_channels
+##  3) Ask chat what is the most elgeant to insert the VAE before and after 
+class StableDiffusionModel(DiffusionModel):
 
-# x = df.sample(10,(32,32),class_labels=torch.arange(10, dtype=torch.long,device="cuda"),guidance_scale=1.1).to("cuda")
-
-# print(x.shape)
-# model = df.model
-# print(model.T)
-# total_params = sum(p.numel() for p in model.parameters())
-# print(f"{total_params:,}")
-# x = model(torch.zeros((10,3,32,32)),torch.zeros((10,1)),torch.zeros((10,),dtype=torch.int))
-
-
-# print(x.shape)
-
+    def __init__(self,
+                device:str,
+                in_channels:int,
+                time_const:int,
+                conditional:bool,
+                n_classes:int,
+                time_embedding_norm:Literal["additive","film"] = "additive",
+                block_depth:int = 2,
+                block_sizes:List[int] = [32,64,96],
+                n_res_blocks:int = 2,
+                noise_embed_dim:int = 128,
+                n_groups:int = 32,
+                n_attn_heads:int = 4,
+                attn_levels:List[bool] = [False,True,True],
+                norm_attn:bool = True,
+                dropout:float = 0.0,
+                beta_schedule:Literal["linear","cosine"] = "cosine",
+                sched_min:float = 0.02,
+                sched_max:float = 0.95,
+                prediction_type:Literal["epsilon","sample","v_prediction"] = "epsilon",
+                ema_decay:float = 0.999,
+                cond_pred:bool = True,
+                ):
+        super().__init__(device, 
+                         in_channels, 
+                         time_const, 
+                         conditional, 
+                         n_classes, 
+                         time_embedding_norm, 
+                         block_depth, 
+                         block_sizes, 
+                         n_res_blocks, 
+                         noise_embed_dim, 
+                         n_groups, 
+                         n_attn_heads, 
+                         attn_levels, 
+                         norm_attn, 
+                         dropout, 
+                         beta_schedule, 
+                         sched_min, 
+                         sched_max, 
+                         prediction_type,
+                         ema_decay, 
+                         cond_pred)
 
 
 

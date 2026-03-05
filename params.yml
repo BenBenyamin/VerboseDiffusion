@@ -9,15 +9,16 @@ grad_norm: 1.0
 in_channels: 3
 time_const: 1000
 conditional: true
+uncond_prob: 0.05
 time_embedding_norm: "additive"
 
 block_depth: 2
 block_sizes:
-  - 32
   - 64
-  - 96
+  - 128
+  - 192
 
-n_res_blocks: 2
+n_res_blocks: 3
 noise_embed_dim: 128
 n_attn_heads: 4
 attn_levels:
@@ -39,6 +40,3 @@ prediction_type: "epsilon"
 
 # EMA
 ema_decay: 0.999
-
-uncond_pred: true
-uncond_prob: 0.1

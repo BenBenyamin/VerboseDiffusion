@@ -1,3 +1,5 @@
+## TODO: Delete one keep the other condtional , cond_pred
+
 import torch
 from torch.optim.swa_utils import AveragedModel , get_ema_multi_avg_fn
 from torch.optim import AdamW
@@ -6,6 +8,8 @@ import torch.nn as nn
 import os
 
 from typing import List , Literal
+
+from tqdm import tqdm
 
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid
@@ -62,6 +66,8 @@ class DiffusionModel:
                  dropout,
         ).to(device)
 
+        self.model = torch.compile(self.model)
+
         self.n_classes = n_classes
 
         self.in_channels = in_channels
@@ -100,6 +106,8 @@ class DiffusionModel:
 
         self.loss = nn.MSELoss(reduction="none")
 
+        self.steps_cnt = 0
+
     def train(
         self,
         steps,
@@ -117,7 +125,11 @@ class DiffusionModel:
 
         self.writer = SummaryWriter(log_dir)
 
-        steps_cnt = 0
+        steps = self.steps_cnt + steps
+        
+        pbar = tqdm(total=steps)
+        
+        epochs = 0
 
         while True:
 
@@ -186,13 +198,25 @@ class DiffusionModel:
 
                 running_loss += loss.item()*batch_size
                 n_examples += batch_size
-                steps_cnt +=1
+                self.steps_cnt +=1
+                pbar.update(1)
             
-                if steps_cnt % log_every == 0:
-                    self._log_metrics(steps_cnt,running_loss/n_examples,val_dataloader,img.shape[2:])
+                if self.steps_cnt % log_every == 0:
+                    self._log_metrics(self.steps_cnt,running_loss/n_examples,val_dataloader,img.shape[2:])
                 
-                if steps_cnt >= steps:
-                    return # Stop training
+                if self.steps_cnt >= steps:
+                    # Stop training
+                    pbar.close()
+                    return
+                
+                pbar.set_postfix(
+                    loss=loss.item(),
+                    lr=optimizer.param_groups[0]["lr"],
+                    epoch = epochs,
+                )
+        
+            epochs+=1
+
 
     
     @torch.inference_mode()
@@ -210,7 +234,7 @@ class DiffusionModel:
         model.eval()
 
 
-        for batch_idx, (img, class_idx) in enumerate(val_dataloader):
+        for batch_idx, (img, class_idx) in enumerate(tqdm(val_dataloader,desc="Validating...")):
                 
                 batch_size = img.shape[0]
 
@@ -378,6 +402,7 @@ class DiffusionModel:
             {
                 "model": self.model.state_dict(),
                 "ema": self.ema.module.state_dict(),
+                "steps": self.steps_cnt,
             },
             path,
         )
@@ -386,6 +411,7 @@ class DiffusionModel:
         ckpt = torch.load(path, map_location=map_location)
         self.model.load_state_dict(ckpt["model"])
         self.ema.module.load_state_dict(ckpt["ema"])
+        self.steps_cnt = ckpt.get("steps_cnt",0)
 
 
 
@@ -423,7 +449,7 @@ class StableDiffusionModel(DiffusionModel):
 
         
         self.device = device
-        self.vae = AutoencoderKL.from_pretrained(pretrained_vae_name,subfolder="vae").to(self.device)
+        self.vae = AutoencoderKL.from_pretrained(pretrained_vae_name).to(self.device)
         self.vae.eval()
 
 
@@ -455,23 +481,78 @@ class StableDiffusionModel(DiffusionModel):
 
 
     @torch.inference_mode()
-    def _preprocess_dataloader(self,dataloader):
+    def _preprocess_dataloader(self, dataloader, microbatch_size, cache_name:str):
+
+        # If cache exists, load it
+        if os.path.exists(cache_name):
+            print(f"Loading cached latents from {cache_name}")
+            return torch.load(cache_name)
 
         lat_dataloader = []
-        for (images,labels) in dataloader:
-            
-            images = images.to(self.device)
-            lats = self.vae.encode(images).latent_dist.sample()*self.scaling_const
-            lats = lats.cpu()
-            lat_dataloader.append((lats, labels))
+
+        for (images, labels) in tqdm(dataloader, total=len(dataloader), desc="Encoding images with VAE"):
+
+            lat_chunks = []
+
+            for i in range(0, images.shape[0], microbatch_size):
+
+                img_chunk = images[i:i+microbatch_size].to(self.device)
+
+                lat = self.vae.encode(img_chunk).latent_dist.sample()
+                lat = lat * self.scaling_const
+
+                lat_chunks.append(lat.cpu())
+
+            lats = torch.cat(lat_chunks, dim=0)
+
+            lat_dataloader.append((lats, labels.cpu()))
+
+            torch.cuda.empty_cache()
+
+        # Save cache
+        os.makedirs(os.path.dirname(cache_name), exist_ok=True)
+        torch.save(lat_dataloader, cache_name)
+
+        print(f"Saved latent cache to {cache_name}")
 
         return lat_dataloader
+
+    @torch.inference_mode()
+    def sample(self,
+               n_samples:int, 
+               shape: tuple, 
+               class_labels = None, 
+               added_noise_weight:float = 0.0, 
+               guidance_scale:float = 1.0
+               ):
+        
+        lats = super().sample(
+            n_samples,
+            shape,
+            class_labels,
+            added_noise_weight,
+            guidance_scale,
+        )
+
+        # Undo normalization
+        lats = lats * 2 - 1
+        # undo latent scaling used during training
+        lats = lats / self.scaling_const
+
+        # Decode
+        imgs = self.vae.decode(lats).sample
+
+        # convert decoded images to display range
+        imgs = (imgs.clamp(-1,1) + 1) / 2
+
+        return imgs
 
     def train(
         self,
         steps,
         train_dataloader,
         val_dataloader,
+        image_load_microbatch:int,
         lr = 0.0001,
         uncond_prob:float = 0.1,
         grad_norm: float | None = 1.0,
@@ -479,8 +560,16 @@ class StableDiffusionModel(DiffusionModel):
         log_every:int = 10_000,
         ):
 
-        lat_train_dataloader = self._preprocess_dataloader(train_dataloader)
-        lat_val_dataloader = self._preprocess_dataloader(val_dataloader)
+        lat_train_dataloader = self._preprocess_dataloader(
+            train_dataloader,
+            image_load_microbatch,
+            cache_name="./dataset/afhq/train_latents.pt"
+            )
+        lat_val_dataloader = self._preprocess_dataloader(
+            val_dataloader,
+            image_load_microbatch,
+            cache_name="./dataset/afhq/val_latents.pt"
+            )
 
         super().train(
             steps,

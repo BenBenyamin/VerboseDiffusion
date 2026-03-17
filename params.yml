@@ -40,3 +40,8 @@ prediction_type: "epsilon"
 
 # EMA
 ema_decay: 0.999
+
+# Latent
+pretrained_vae_name: "stabilityai/sd-vae-ft-mse"
+scaling_const: 0.1825
+image_load_microbatch: 8

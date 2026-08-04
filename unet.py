@@ -39,7 +39,6 @@ from typing import List , Literal
 class SinusoidalEmbedding(nn.Module):
 
     def __init__(self,
-                 device:str,
                  noise_embedding_size:int,
                  n_timesteps:int,
                  min_freq:float = 1.0,
@@ -47,14 +46,14 @@ class SinusoidalEmbedding(nn.Module):
                  ):
         super().__init__()
 
-        min_freq = torch.log10(torch.tensor(min_freq,dtype=torch.float16,device=device))
-        max_freq = torch.log10(torch.tensor(max_freq,dtype=torch.float16,device=device))
+        min_freq = torch.log10(torch.tensor(min_freq,dtype=torch.float32))
+        max_freq = torch.log10(torch.tensor(max_freq,dtype=torch.float32))
 
         self.embed_size = noise_embedding_size
         self.T = n_timesteps
 
-        frequencies = torch.pow(10,torch.linspace(min_freq,max_freq , self.embed_size // 2)).to(device)
-        self.angular_speeds = 2.0 * torch.pi * frequencies
+        frequencies = torch.pow(10,torch.linspace(min_freq,max_freq , self.embed_size // 2))
+        self.register_buffer("angular_speeds",2.0 * torch.pi * frequencies)
     
     def forward(self,x):
 
@@ -196,6 +195,8 @@ class AttentionBlock(nn.Module):
 
         B, C, H, W = x.shape
 
+        residual = x
+
         if self.norm is not None:
         
             x = self.norm(x)
@@ -209,7 +210,7 @@ class AttentionBlock(nn.Module):
         x_attn = x_attn.transpose(1, 2).contiguous().view(B, C, H, W)
 
 
-        return x_attn
+        return residual + x_attn # Add residual
         
 class DownBlock(nn.Module):
 
@@ -272,11 +273,11 @@ class DownBlock(nn.Module):
 
             skips.append(x)
 
-        x = self.downsample(x)
-
         if self.has_attn:
             x = self.attn(x)
         
+        x = self.downsample(x)
+
         return x, skips
 
 
@@ -299,7 +300,15 @@ class UpBlock(nn.Module):
         self.depth = depth
 
         # Make it 2x bigger
-        self.up_sample = nn.Upsample(scale_factor=2, mode="nearest")
+        # Mode="nearest" just copies each pixel into a 2×2 block ,pure duplication, no learnable params. 
+        # That's why bare-nearest upsampling produces those blocky/checkerboard artifacts: adjacent pixels in the upsampled map are identical.                                    
+        # Fix: follow the interp with a 3×3 conv (same in/out channels), so the network gets a learnable step to smooth and mix the duplicated 
+        # pixels.      
+        self.up_sample = nn.Sequential(                                                                                                      
+            nn.Upsample(scale_factor=2, mode="nearest"),
+            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),                                                                   
+        )
+
 
         self.res_blocks = nn.ModuleList()
         for _ in range(depth-1):
@@ -350,7 +359,6 @@ class UpBlock(nn.Module):
 class UNet(nn.Module):
 
     def __init__(self,
-                 device:str,
                  in_channels:int, 
                  time_const:int,
                  conditional:bool,
@@ -362,7 +370,7 @@ class UNet(nn.Module):
                  noise_embed_dim:int = 128,
                  n_groups:int = 32,
                  n_attn_heads:int = 4,
-                 attn_levels:List[bool] = [False,True,True],
+                 attn_levels:List[bool] = [False,True],
                  norm_attn:bool = True,
                  dropout:float = 0.0,
                  ):
@@ -370,8 +378,6 @@ class UNet(nn.Module):
         super().__init__()
         self.T = time_const
         self.noise_embed_dim = noise_embed_dim
-
-        self.device = device
 
         if conditional:
             self.class_embd = nn.Embedding(n_classes,noise_embed_dim)
@@ -381,7 +387,7 @@ class UNet(nn.Module):
         # 1) Get t ∈[0,T]        
         self.noise_pipeline = nn.Sequential(
         # 2) Do sin embedding to get a vector of size embed_dim
-        SinusoidalEmbedding(self.device, noise_embed_dim,time_const),
+        SinusoidalEmbedding(noise_embed_dim,time_const),
         # 3) Pass it through a MLP: embed_dim -> 4*embed_dim
         nn.Linear(self.noise_embed_dim,4*self.noise_embed_dim),
         # 4) Activation
@@ -408,12 +414,28 @@ class UNet(nn.Module):
             ]
         )
 
-        horz_channels = [block_sizes[-1]]*n_res_blocks
+        # Build n_res_blocks of ResidualBlock
+        self.horz_res_blocks = nn.ModuleList(
+            [
+                ResidualBlock(block_sizes[-1],block_sizes[-1],
+                              time_embedding_norm,
+                              noise_embed_dim,
+                              n_groups,
+                              dropout,
+                              )
+                for _ in range(n_res_blocks)
+            ]
+        )
 
-        self.horz_blocks = nn.Sequential(
-            *[
-                ResidualBlock(horz_channels[i],horz_channels[i+1],time_embedding_norm,noise_embed_dim)
-                for i in range(len(horz_channels)-1)
+        self.horz_attn_blocks = nn.ModuleList(
+            [
+                AttentionBlock(block_sizes[-1],
+                            n_attn_heads,
+                            dropout,
+                            norm_attn,
+                            n_groups,
+                            )
+                for _ in range(n_res_blocks - 1)
             ]
         )
         
@@ -436,7 +458,11 @@ class UNet(nn.Module):
             ]
         )
 
-        self.out_conv = nn.Conv2d(block_sizes[0],in_channels,kernel_size=3,padding=1)
+        self.out_head = nn.Sequential(
+            nn.GroupNorm(n_groups, num_channels=block_sizes[0]),
+            nn.SiLU(),
+            nn.Conv2d(block_sizes[0], in_channels, kernel_size=3, padding=1),
+        )
         
     def forward(self,img,noise_level:int,class_idx = None):
 
@@ -452,13 +478,16 @@ class UNet(nn.Module):
 
             x , level_skips = db(x,temb)
             skips.append(level_skips)
-        
-        for block in self.horz_blocks:
-            x = block(x, temb)
+
+        # Do the Res-> Attention -> Res ->Attention ->... alternation
+        x = self.horz_res_blocks[0](x, temb)
+        for attn, res in zip(self.horz_attn_blocks, self.horz_res_blocks[1:]):
+            x = attn(x)
+            x = res(x, temb)
 
         for ub, level_skips in zip(self.up_blocks, reversed(skips)):
             x = ub((x, level_skips),temb)
 
-        x = self.out_conv(x)
+        x = self.out_head(x)
         
         return x

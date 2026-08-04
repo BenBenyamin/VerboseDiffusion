@@ -24,7 +24,6 @@ n_attn_heads: 4
 attn_levels:
   - false
   - true
-  - true
 
 n_groups: 32
 norm_attn: true

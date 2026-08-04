@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 
 import yaml
 
-from unet import DiffusionModel
+from diffusion import DiffusionModel
 
 
 # load config

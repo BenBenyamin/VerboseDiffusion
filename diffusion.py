@@ -11,6 +11,7 @@ from typing import List , Literal
 
 from tqdm import tqdm
 
+from torch.utils.data import TensorDataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid
 
@@ -44,12 +45,10 @@ class DiffusionModel:
                  cond_pred:bool = True,
                  ):    
         
-        
         if cond_pred:
             n_classes +=1 # add null class
 
         self.model = UNet(
-                 device,
                  in_channels, 
                  time_const,
                  conditional,
@@ -283,7 +282,8 @@ class DiffusionModel:
                shape: tuple, 
                class_labels = None, 
                added_noise_weight:float = 0.0, 
-               guidance_scale:float = 1.0
+               guidance_scale:float = 1.0,
+               normalize = True,
                ):
         
         #generate the noise
@@ -345,7 +345,14 @@ class DiffusionModel:
 
             x_t = prev_sr * x_0 + torch.sqrt(1 - prev_sr**2 - sigma_t**2) * pred_eps + sigma_t * torch.randn_like(x_t)
 
-        x_0 = (x_0.clamp(-1,1) + 1) / 2  # normalize to [0,1]
+        # The cosine schedule chosen here doesn't necessarily start from 1, so the forward
+        # process never reaches perfectly clean data at t=0. The loop above also
+        # stopped at t=1, because t=0 would index signal_rates[-1] via negative
+        # wraparound , meaning the last DDIM update still has residual noise.
+        # Return the model's own x_0 prediction from that final step instead.
+
+        if normalize: # normalize to [0,1]
+            x_0 = (x_0.clamp(-1,1) + 1) / 2  
         return x_0
             
 
@@ -411,7 +418,7 @@ class DiffusionModel:
         ckpt = torch.load(path, map_location=map_location)
         self.model.load_state_dict(ckpt["model"])
         self.ema.module.load_state_dict(ckpt["ema"])
-        self.steps_cnt = ckpt.get("steps_cnt",0)
+        self.steps_cnt = ckpt.get("steps",0)
 
 
 
@@ -481,41 +488,51 @@ class StableDiffusionModel(DiffusionModel):
 
 
     @torch.inference_mode()
-    def _preprocess_dataloader(self, dataloader, microbatch_size, cache_name:str):
+    def _preprocess_dataloader(self, 
+                               dataloader, 
+                               microbatch_size, 
+                               cache_name:str,
+                               shuffle = True,
+                               ):
 
         # If cache exists, load it
         if os.path.exists(cache_name):
             print(f"Loading cached latents from {cache_name}")
-            return torch.load(cache_name)
+            cache = torch.load(cache_name)
+            all_lats, all_labels = cache["lats"], cache["labels"]
 
-        lat_dataloader = []
+        else: # Generate lat,label pairs
+            all_lats = []
+            all_labels = []
 
-        for (images, labels) in tqdm(dataloader, total=len(dataloader), desc="Encoding images with VAE"):
+            for (images, labels) in tqdm(dataloader, total=len(dataloader), desc="Encoding images with VAE"):
 
-            lat_chunks = []
 
-            for i in range(0, images.shape[0], microbatch_size):
+                for i in range(0, images.shape[0], microbatch_size):
 
-                img_chunk = images[i:i+microbatch_size].to(self.device)
+                    img_chunk = images[i:i+microbatch_size].to(self.device)
 
-                lat = self.vae.encode(img_chunk).latent_dist.sample()
-                lat = lat * self.scaling_const
+                    lat = self.vae.encode(img_chunk).latent_dist.sample()
+                    lat = lat * self.scaling_const
 
-                lat_chunks.append(lat.cpu())
+                    all_lats.append(lat.cpu())
 
-            lats = torch.cat(lat_chunks, dim=0)
+                all_labels.append(labels.cpu())
 
-            lat_dataloader.append((lats, labels.cpu()))
+            all_lats = torch.cat(all_lats, dim=0)      # shape (N, C, H, W)
+            all_labels = torch.cat(all_labels, dim=0)  # shape (N,)
+            # Save cache
+            os.makedirs(os.path.dirname(cache_name), exist_ok=True)
+            torch.save({"lats": all_lats, "labels": all_labels}, cache_name)
 
-            torch.cuda.empty_cache()
+            print(f"Saved latent cache to {cache_name}")
 
-        # Save cache
-        os.makedirs(os.path.dirname(cache_name), exist_ok=True)
-        torch.save(lat_dataloader, cache_name)
-
-        print(f"Saved latent cache to {cache_name}")
-
-        return lat_dataloader
+        return DataLoader(
+            TensorDataset(all_lats, all_labels),
+            batch_size=dataloader.batch_size,
+            shuffle=shuffle,          # from the new function arg
+            num_workers=dataloader.num_workers,
+        )
 
     @torch.inference_mode()
     def sample(self,
@@ -532,10 +549,9 @@ class StableDiffusionModel(DiffusionModel):
             class_labels,
             added_noise_weight,
             guidance_scale,
+            normalize=False, # Do not normalize for latents
         )
 
-        # Undo normalization
-        lats = lats * 2 - 1
         # undo latent scaling used during training
         lats = lats / self.scaling_const
 
@@ -563,12 +579,14 @@ class StableDiffusionModel(DiffusionModel):
         lat_train_dataloader = self._preprocess_dataloader(
             train_dataloader,
             image_load_microbatch,
-            cache_name="./dataset/afhq/train_latents.pt"
+            cache_name="./dataset/afhq/train_latents.pt",
+            shuffle=True,
             )
         lat_val_dataloader = self._preprocess_dataloader(
             val_dataloader,
             image_load_microbatch,
-            cache_name="./dataset/afhq/val_latents.pt"
+            cache_name="./dataset/afhq/val_latents.pt",
+            shuffle=False,
             )
 
         super().train(

@@ -19,7 +19,13 @@ with open(params_filepath, "r") as f:
     params = yaml.safe_load(f)
 
 # Define image transforms (normalize to roughly zero mean / unit variance)
-transform = transforms.Compose([
+train_transform = transforms.Compose([
+    transforms.RandomHorizontalFlip(),  # Animal faces are symmetrical
+    transforms.ToTensor(),
+    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+])
+
+val_transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
 ])
@@ -27,13 +33,13 @@ transform = transforms.Compose([
 # Training dataset
 train_dataset = datasets.ImageFolder(
     root = "./dataset/afhq/train",
-    transform=transform
+    transform=train_transform
 )
 
 # Val dataset
 val_dataset = datasets.ImageFolder(
     root = "./dataset/afhq/val",
-    transform=transform
+    transform=val_transform
 )
 
 
@@ -86,10 +92,6 @@ label_names = train_dataset.classes
 
 print(label_names)
 
-dfm.load("Stable_100k")
-
-dfm.steps_cnt = 100_000
-
 dfm.train(
     steps = 100_000,
     train_dataloader = train_loader,
@@ -101,4 +103,4 @@ dfm.train(
     log_every = 5_000,
 )
 
-dfm.save("Stable_200k")
+dfm.save("100k_Lat")

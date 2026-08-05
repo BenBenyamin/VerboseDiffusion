@@ -1,6 +1,6 @@
 # Model and training configuration
 device: "cuda"
-batch_size: 64
+batch_size: 128
 num_workers: 4
 lr: 0.0001
 grad_norm: 1.0
@@ -9,25 +9,27 @@ grad_norm: 1.0
 in_channels: 3
 time_const: 1000
 conditional: true
-uncond_prob: 0.05
+uncond_prob: 0.1
 time_embedding_norm: "additive"
 
 block_depth: 2
 block_sizes:
-  - 64
   - 128
-  - 192
+  - 256
+  - 384
+  - 512
 
 n_res_blocks: 3
-noise_embed_dim: 128
-n_attn_heads: 4
+noise_embed_dim: 256
+n_attn_heads: 8
 attn_levels:
   - false
+  - true
   - true
 
 n_groups: 32
 norm_attn: true
-dropout: 0.0
+dropout: 0.1
 
 # Diffusion schedule
 beta_schedule: "cosine"
@@ -38,9 +40,9 @@ sched_max: 0.95
 prediction_type: "epsilon"
 
 # EMA
-ema_decay: 0.999
+ema_decay: 0.9999
 
 # Latent
 pretrained_vae_name: "stabilityai/sd-vae-ft-mse"
-scaling_const: 0.1825
+scaling_const: 0.18215
 image_load_microbatch: 8

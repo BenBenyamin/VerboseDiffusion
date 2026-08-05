@@ -115,7 +115,7 @@ class DiffusionModel:
         lr = 0.0001,
         uncond_prob:float = 0.1,
         grad_norm: float | None = 1.0,
-        log_dir:str = "./runs/",
+        log_dir:str = None,
         log_every:int = 10_000,
         ):
         
@@ -123,6 +123,7 @@ class DiffusionModel:
         scaler = torch.amp.GradScaler("cuda")
 
         self.writer = SummaryWriter(log_dir)
+        self.log_dir = self.writer.get_logdir()
 
         steps = self.steps_cnt + steps
         
@@ -202,9 +203,11 @@ class DiffusionModel:
             
                 if self.steps_cnt % log_every == 0:
                     self._log_metrics(self.steps_cnt,running_loss/n_examples,val_dataloader,img.shape[2:])
+                    self.save(f"{self.log_dir }/step_{self.steps_cnt:07d}.pt")
                 
                 if self.steps_cnt >= steps:
                     # Stop training
+                    self.save(f"{self.log_dir }/final.pt")
                     pbar.close()
                     return
                 
@@ -572,7 +575,7 @@ class StableDiffusionModel(DiffusionModel):
         lr = 0.0001,
         uncond_prob:float = 0.1,
         grad_norm: float | None = 1.0,
-        log_dir:str = "./runs/",
+        log_dir:str = None,
         log_every:int = 10_000,
         ):
 

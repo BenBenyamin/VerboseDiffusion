@@ -48,6 +48,11 @@ class DiffusionModel:
         if cond_pred:
             n_classes +=1 # add null class
 
+        # Check if bf16 is supported, else fallback to float16
+        self.amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+
+        print(f"Using {self.amp_dtype}")
+
         self.model = UNet(
                  in_channels, 
                  time_const,
@@ -120,7 +125,7 @@ class DiffusionModel:
         ):
         
         optimizer = AdamW(self.model.parameters(), lr=lr)
-        scaler = torch.amp.GradScaler("cuda")
+        scaler = torch.amp.GradScaler("cuda", enabled=(self.amp_dtype == torch.float16))
 
         self.writer = SummaryWriter(log_dir)
         self.log_dir = self.writer.get_logdir()
@@ -162,7 +167,7 @@ class DiffusionModel:
                 else:
                     class_idx_input = class_idx
 
-                with torch.autocast("cuda", dtype=torch.float16):
+                with torch.autocast("cuda", dtype=self.amp_dtype):
 
                     model_output = self.model(noisy_img,ts,class_idx_input)
 
@@ -287,6 +292,7 @@ class DiffusionModel:
                added_noise_weight:float = 0.0, 
                guidance_scale:float = 1.0,
                normalize = True,
+               use_amp = True,
                ):
         
         #generate the noise
@@ -311,14 +317,16 @@ class DiffusionModel:
             nr = self.noise_rates[ts].view(n_samples,1,1,1)
             sr = self.signal_rates[ts].view(n_samples,1,1,1)
 
-            # use CFG?
-            if self.cond_pred and guidance_scale != 1.0:
-                uncond_labels = torch.zeros_like(class_labels)  # 0 is your unconditional token
-                out_uncond = self.ema.module(x_t, ts, class_idx=uncond_labels)
-                out_cond   = self.ema.module(x_t, ts, class_idx=class_labels)
-                model_out  = out_uncond + guidance_scale * (out_cond - out_uncond)
-            else:
-                model_out  = self.ema.module(x_t, ts, class_idx=class_labels)
+            # Cast to self.amp_dtype (bfloat16 or float16) to shave VRAM
+            with torch.autocast("cuda", dtype=self.amp_dtype, enabled=use_amp):
+                # use CFG?
+                if self.cond_pred and guidance_scale != 1.0:
+                    uncond_labels = torch.zeros_like(class_labels)  # 0 is your unconditional token
+                    out_uncond = self.ema.module(x_t, ts, class_idx=uncond_labels)
+                    out_cond   = self.ema.module(x_t, ts, class_idx=class_labels)
+                    model_out  = out_uncond + guidance_scale * (out_cond - out_uncond)
+                else:
+                    model_out  = self.ema.module(x_t, ts, class_idx=class_labels)
             
 
             if self.pred_type == "epsilon":
@@ -393,6 +401,7 @@ class DiffusionModel:
                  shape: tuple, 
                  guidance_scale:float = 1.0,
                  seed:int = 0,
+                 use_amp = True,
                  ):
 
         with torch.random.fork_rng(enabled=True):
@@ -403,7 +412,8 @@ class DiffusionModel:
                 n_samples=len(class_idx),
                 shape=shape,
                 class_labels=class_labels,
-                guidance_scale=guidance_scale
+                guidance_scale=guidance_scale,
+                use_amp=use_amp,
             )
 
     def save(self, path: str):
@@ -543,7 +553,8 @@ class StableDiffusionModel(DiffusionModel):
                shape: tuple, 
                class_labels = None, 
                added_noise_weight:float = 0.0, 
-               guidance_scale:float = 1.0
+               guidance_scale:float = 1.0,
+               use_amp = True,
                ):
         
         lats = super().sample(
@@ -553,6 +564,7 @@ class StableDiffusionModel(DiffusionModel):
             added_noise_weight,
             guidance_scale,
             normalize=False, # Do not normalize for latents
+            use_amp=use_amp,
         )
 
         # undo latent scaling used during training

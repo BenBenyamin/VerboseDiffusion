@@ -5,19 +5,22 @@ from torch.optim.swa_utils import AveragedModel , get_ema_multi_avg_fn
 from torch.optim import AdamW
 import torch.nn as nn
 
+from torch.utils.data import TensorDataset, DataLoader
+from torch.utils.tensorboard import SummaryWriter
+from torchvision.utils import make_grid
+
+from functools import lru_cache
+
 import os
 
 from typing import List , Literal
 
 from tqdm import tqdm
 
-from torch.utils.data import TensorDataset, DataLoader
-from torch.utils.tensorboard import SummaryWriter
-from torchvision.utils import make_grid
-
 from unet import UNet
 
 from diffusers import AutoencoderKL
+
 
 class DiffusionModel:
 
@@ -224,8 +227,34 @@ class DiffusionModel:
         
             epochs+=1
 
+        
 
-    
+    @lru_cache(maxsize=8)
+    def _compute_ab(self, M):
+
+        # Adams-Bashforth coefficients (alphas) used in DPM solver. Derivation from
+        # Taylor series going backwards, only interpolates compared to Newton-Cotes.
+        # For each k = 0 .. M-1:
+        #   sum_{m=0}^{M-1}  alpha[m] * (-m)^k  =  1 / (k + 1)
+        #  ┌                             ┐ ┌     ┐   ┌     ┐
+        #  │ 1   1   1   ...      1      │ │ a_0 │   │  1  │
+        #  │ 0  -1  -2   ...   -(M-1)    │ │ a_1 │   │ 1/2 │
+        #  │ 0   1   4   ...   (M-1)^2   │ │ a_2 │ = │ 1/3 │
+        #  │ 0  -1  -8   ...  -(M-1)^3   │ │ ... │   │ 1/4 │
+        #  │ 0  (-1)ᵏmᵏ  ...  (-M+1)ᴹ⁻¹  │ │a_M-1│   │ 1/M │
+        #  └                             ┘ └     ┘   └     ┘
+        # Below is just a more efficient way of solving the system of equations.
+
+        k = torch.arange(M).view(M, 1).double()        # Column vector: shape (M, 1)
+        m = torch.arange(M).view(1, M).double()        # Row vector:    shape (1, M)
+
+        V = torch.pow(-m, k)
+        b = 1.0 / (torch.arange(M).double().view(M, 1) + 1.0)
+        
+        alpha = torch.linalg.solve(V, b)
+        
+        return alpha.flatten().float()
+
     @torch.inference_mode()
     def validate(self, val_dataloader , mode:Literal["raw","ema"]):
         
@@ -291,7 +320,9 @@ class DiffusionModel:
                class_labels = None, 
                added_noise_weight:float = 0.0, 
                guidance_scale:float = 1.0,
+               n_steps:int = None,
                normalize = True,
+               dpmpp_order = None,
                use_amp = True,
                ):
         
@@ -309,8 +340,15 @@ class DiffusionModel:
             
             class_labels = torch.randint(0, self.n_classes, (n_samples,), device=device)
 
+        if n_steps is None or n_steps > self.T:
+            n_steps = self.T
 
-        for t in reversed(range(1,self.T)):
+        # Init prev x0s for DPM Solver ++
+        if dpmpp_order is not None:
+            x_0_prev = []
+
+        schedule = torch.linspace(self.T - 1, 0, n_steps + 1).long()
+        for t, t_prev in zip(schedule[:-1], schedule[1:]):
             
             ts = torch.full((n_samples,), t, device=device, dtype=torch.long)
             
@@ -348,21 +386,42 @@ class DiffusionModel:
                 x_0 = sr * x_t - nr * v_pred
             
             # sr = sqrt(alpha_t), nr = sqrt(1- alpha_t)
-            prev_sr = self.signal_rates[ts-1].view(n_samples,1,1,1)
-            prev_nr = self.noise_rates[ts-1].view(n_samples,1,1,1)
+            prev_sr = self.signal_rates[t_prev].view(n_samples,1,1,1)
+            prev_nr = self.noise_rates[t_prev].view(n_samples,1,1,1)
             
-            # https://arxiv.org/pdf/2010.02502#page=6 eq 16 , added_noise_weight = eta
-            sigma_t = added_noise_weight * (prev_nr / nr) * torch.sqrt(torch.abs(1 - sr**2/prev_sr**2))
+            # If not using DPM Solver++, use DDIM
+            if dpmpp_order is None:
+                # https://arxiv.org/pdf/2010.02502#page=6 eq 16 , added_noise_weight = eta
+                sigma_t = added_noise_weight * (prev_nr / nr) * torch.sqrt(torch.abs(1 - sr**2/prev_sr**2))
+                
+                x_t = prev_sr * x_0 + torch.sqrt(1 - prev_sr**2 - sigma_t**2) * pred_eps + sigma_t * torch.randn_like(x_t)
 
-            x_t = prev_sr * x_0 + torch.sqrt(1 - prev_sr**2 - sigma_t**2) * pred_eps + sigma_t * torch.randn_like(x_t)
+            else: # DPM Solver++
+                
+                # boot strap
+                if len(x_0_prev) == 0:
+                    x_0_prev = [x_0]*(dpmpp_order -1)
 
-        # The cosine schedule chosen here doesn't necessarily start from 1, so the forward
-        # process never reaches perfectly clean data at t=0. The loop above also
-        # stopped at t=1, because t=0 would index signal_rates[-1] via negative
-        # wraparound , meaning the last DDIM update still has residual noise.
-        # Return the model's own x_0 prediction from that final step instead.
+                x_0_prev = [x_0] + x_0_prev # prepend the new x_0
 
-        if normalize: # normalize to [0,1]
+                coeff = self._compute_ab(dpmpp_order).view(-1, 1, 1, 1, 1)
+                h = torch.log(prev_sr / prev_nr) - torch.log(sr / nr)
+
+                # r = 1 , assumes uniform log-SNR schedule
+                x_0_effective = (torch.stack(x_0_prev, dim=0) * coeff).sum(dim=0)
+
+                x_t = (prev_nr / nr) * x_t + prev_sr * (1 - torch.exp(-h)) * x_0_effective
+
+                # Shift x_0 right prev so it will be [curr,prev,prev_prev...]
+                x_0_prev = x_0_prev[:-1] # remove last element 
+
+        # The cosine schedule does not necessarily reach perfectly clean data at t=0
+        # signal_rates[0] = cos(acos(sched_max)
+        # so even after the last update x_t still carries residual noise.
+        # The model's x_0 prediction from that final step is the cleaner estimate
+        # return it instead of x_t.
+
+        if normalize: # normalize to [0,1], use only in pixel diffusion
             x_0 = (x_0.clamp(-1,1) + 1) / 2  
         return x_0
             

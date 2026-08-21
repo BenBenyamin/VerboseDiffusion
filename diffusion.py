@@ -386,8 +386,8 @@ class DiffusionModel:
                 x_0 = sr * x_t - nr * v_pred
             
             # sr = sqrt(alpha_t), nr = sqrt(1- alpha_t)
-            prev_sr = self.signal_rates[t_prev].view(n_samples,1,1,1)
-            prev_nr = self.noise_rates[t_prev].view(n_samples,1,1,1)
+            prev_sr = self.signal_rates[t_prev].view(1,1,1,1)
+            prev_nr = self.noise_rates[t_prev].view(1,1,1,1)
             
             # If not using DPM Solver++, use DDIM
             if dpmpp_order is None:
@@ -404,7 +404,7 @@ class DiffusionModel:
 
                 x_0_prev = [x_0] + x_0_prev # prepend the new x_0
 
-                coeff = self._compute_ab(dpmpp_order).view(-1, 1, 1, 1, 1)
+                coeff = self._compute_ab(dpmpp_order).view(-1, 1, 1, 1, 1).to(x_t.device)
                 h = torch.log(prev_sr / prev_nr) - torch.log(sr / nr)
 
                 # r = 1 , assumes uniform log-SNR schedule
@@ -461,6 +461,9 @@ class DiffusionModel:
                  guidance_scale:float = 1.0,
                  seed:int = 0,
                  use_amp = True,
+                 n_steps: int = None,
+                 dpmpp_order = None,
+                 added_noise_weight: float = 0.0,
                  ):
 
         with torch.random.fork_rng(enabled=True):
@@ -471,7 +474,10 @@ class DiffusionModel:
                 n_samples=len(class_idx),
                 shape=shape,
                 class_labels=class_labels,
+                added_noise_weight=added_noise_weight,
                 guidance_scale=guidance_scale,
+                n_steps=n_steps,
+                dpmpp_order=dpmpp_order,
                 use_amp=use_amp,
             )
 
@@ -613,6 +619,8 @@ class StableDiffusionModel(DiffusionModel):
                class_labels = None, 
                added_noise_weight:float = 0.0, 
                guidance_scale:float = 1.0,
+               n_steps: int = None,          # NEW
+               dpmpp_order = None,           # NEW
                use_amp = True,
                ):
         
@@ -623,6 +631,8 @@ class StableDiffusionModel(DiffusionModel):
             added_noise_weight,
             guidance_scale,
             normalize=False, # Do not normalize for latents
+            n_steps=n_steps,
+            dpmpp_order=dpmpp_order,
             use_amp=use_amp,
         )
 

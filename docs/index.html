@@ -1,0 +1,1986 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>VerboseDiffusion — a diffusion model from scratch</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Newsreader:ital,opsz,wght@0,6..72,300..700;1,6..72,300..700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+<style>
+/* ============================================================
+   Tokens
+   ============================================================ */
+:root {
+  --paper:      #faf7f2;
+  --paper-alt:  #f2ede4;
+  --paper-warm: #ede5d4;
+  --ink:        #1a1817;
+  --ink-soft:   #46423d;
+  --ink-mute:   #7a7368;
+  --rule:       #cfc7b7;
+  --rule-soft:  #e4ddce;
+  --accent:     #a64d1f;
+  --accent-soft:#dc9b7d;
+  --accent-2:   #4a6d4a;
+  --accent-3:   #6a5a89;
+
+  --f-display:  "Instrument Serif", "Newsreader", ui-serif, Georgia, serif;
+  --f-body:     "Newsreader", ui-serif, Georgia, serif;
+  --f-mono:     "IBM Plex Mono", "Menlo", "DejaVu Sans Mono", "Consolas",
+                "Liberation Mono", ui-monospace, "SF Mono", monospace;
+
+  --gutter:     max(20px, 4vw);
+  --side:       max(20px, 6vw);
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+html, body { margin: 0; padding: 0; background: var(--paper); color: var(--ink); }
+body {
+  font-family: var(--f-body);
+  font-size: 18px;
+  line-height: 1.62;
+  font-weight: 380;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow-x: hidden;
+}
+
+/* ============================================================
+   Content grid — centered via 1fr outer tracks
+   ============================================================ */
+main {
+  display: grid;
+  grid-template-columns:
+    [full-start] 1fr
+    [wide-start] minmax(20px, 140px)
+    [body-start] minmax(0, 68ch) [body-end]
+    minmax(20px, 140px) [wide-end]
+    1fr [full-end];
+  column-gap: 24px;
+}
+.full-bleed { grid-column: full-start / full-end; }
+.wide       { grid-column: wide-start / wide-end; }
+.body       { grid-column: body-start / body-end; }
+/* Section is display:contents, so its children participate in main's grid
+   directly. Force every un-classed section child into the reading column;
+   the wider / bleed classes below win via specificity. */
+section > h2,
+section > .section-mark,
+section > p,
+section > .body,
+section > .coda,
+main > .coda,
+main > footer {
+  grid-column: body-start / body-end;
+}
+section > .figure-block,
+section > .chart-figure,
+section > .two-up {
+  grid-column: wide-start / wide-end;
+}
+section > .bleed-fig,
+section > .full-bleed {
+  grid-column: full-start / full-end;
+}
+
+@media (max-width: 900px) {
+  main {
+    grid-template-columns: [full-start] 20px [wide-start body-start] 1fr [body-end wide-end] 20px [full-end];
+  }
+  .wide { grid-column: wide-start / wide-end; }
+}
+
+/* ============================================================
+   Type
+   ============================================================ */
+h1, h2, h3 { margin: 0; font-family: var(--f-display); font-weight: 400; letter-spacing: -0.008em; }
+h1 { font-size: clamp(56px, 8.5vw, 96px); line-height: 0.98; }
+h2 { font-size: clamp(34px, 4.5vw, 48px); line-height: 1.05; margin-top: 96px; margin-bottom: 22px; padding-left: 12px; border-left: 3px solid var(--accent); }
+h3 { font-size: 24px; line-height: 1.2; margin-top: 32px; margin-bottom: 8px; }
+.section-mark { padding-left: 15px; }
+
+p { margin: 0 0 1em; }
+p + p { margin-top: 0; }
+em { font-style: italic; color: var(--ink); }
+strong { font-weight: 600; }
+
+.drop::first-letter {
+  font-family: var(--f-display);
+  float: left;
+  font-size: 5em;
+  line-height: 0.82;
+  margin: 0.06em 0.08em 0 -0.02em;
+  color: var(--accent);
+}
+
+.mono { font-family: var(--f-mono); font-size: 0.86em; }
+.mono-small { font-family: var(--f-mono); font-size: 0.78em; letter-spacing: 0.02em; }
+code {
+  font-family: var(--f-mono);
+  font-size: 0.86em;
+  background: var(--paper-alt);
+  padding: 1px 6px;
+  border-radius: 3px;
+  color: var(--ink);
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+
+/* ============================================================
+   Hero
+   ============================================================ */
+.hero {
+  min-height: 92vh;
+  padding: max(60px, 6vw) var(--side) max(48px, 5vw);
+  position: relative;
+  overflow: hidden;
+  background: var(--paper);
+}
+.hero-bg {
+  position: absolute;
+  inset: 0;
+  background: url("panels/panel_09_diversity.png") center/cover no-repeat;
+  opacity: 0.14;
+  filter: saturate(0.85);
+  pointer-events: none;
+  transform: translateY(var(--parallax, 0px));
+  will-change: transform;
+}
+.hero-vignette {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, var(--paper) 0%, transparent 15%, transparent 70%, var(--paper) 100%);
+  pointer-events: none;
+}
+.hero-inner {
+  position: relative;
+  max-width: 1400px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-rows: 1fr auto 1fr;
+  min-height: calc(92vh - max(108px, 11vw));
+}
+.hero-tag {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.hero-tag .dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+}
+.hero-brand {
+  font-family: var(--f-display);
+  font-size: clamp(72px, 11vw, 130px);
+  line-height: 0.9;
+  letter-spacing: -0.03em;
+  margin: 0;
+  color: var(--ink);
+}
+.hero-subtitle {
+  font-family: var(--f-display);
+  font-size: clamp(28px, 3.6vw, 44px);
+  line-height: 1.12;
+  letter-spacing: -0.01em;
+  color: var(--ink-soft);
+  margin: 16px 0 0;
+  max-width: 24ch;
+  font-weight: 400;
+}
+.hero-subtitle em { font-style: italic; color: var(--accent); }
+.hero-titles { margin: 0; }
+.hero-byline {
+  font-family: var(--f-mono);
+  font-size: 14px;
+  color: var(--ink-mute);
+  letter-spacing: 0.04em;
+  margin: 28px 0 0;
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.hero-byline .by-prefix { font-size: 13px; }
+.hero-byline .author-name {
+  font-family: var(--f-display);
+  font-size: clamp(28px, 3.4vw, 42px);
+  font-style: italic;
+  font-weight: 400;
+  color: var(--ink);
+  letter-spacing: -0.01em;
+  line-height: 1;
+}
+.hero-byline .divider {
+  color: var(--ink-mute);
+  font-size: 18px;
+}
+.hero-byline a {
+  color: var(--accent);
+  border-bottom: 1px solid var(--accent-soft);
+  padding-bottom: 1px;
+  font-size: 13px;
+}
+.hero-byline a:hover { border-bottom-color: var(--accent); text-decoration: none; }
+.hero-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+.hero-meta .lede {
+  font-family: var(--f-display);
+  font-size: clamp(19px, 1.7vw, 22px);
+  line-height: 1.42;
+  max-width: 44ch;
+  color: var(--ink-soft);
+  margin: 0;
+}
+.stat-block { text-align: right; }
+.stat-num {
+  font-family: var(--f-display);
+  font-size: clamp(60px, 8vw, 96px);
+  line-height: 0.92;
+  color: var(--accent);
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.stat-lbl {
+  font-family: var(--f-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  margin-top: 6px;
+}
+
+.hero-nav {
+  position: absolute;
+  top: 28px;
+  right: var(--side);
+  display: flex;
+  gap: 20px;
+  font-family: var(--f-mono);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.hero-nav a { color: var(--ink-soft); }
+.hero-nav a:hover { color: var(--accent); text-decoration: none; }
+
+/* ============================================================
+   Sections & body prose
+   ============================================================ */
+main { padding-top: 40px; padding-bottom: 120px; }
+section { display: contents; }
+.section-mark {
+  display: block;
+  font-family: var(--f-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-top: 96px;
+  margin-bottom: 4px;
+}
+.body p { max-width: 68ch; }
+.body ul, .body ol { max-width: 68ch; padding-left: 1.4em; }
+.body li { margin: 0.35em 0; }
+
+/* ============================================================
+   Figure block (wide, with sticky margin caption)
+   ============================================================ */
+.figure-block {
+  grid-column: wide-start / wide-end;
+  margin: 48px 0;
+  display: grid;
+  grid-template-columns: minmax(0, 140px) minmax(0, 1fr);
+  column-gap: 32px;
+  align-items: start;
+}
+.figure-block > .caption-col {
+  position: sticky;
+  top: 40px;
+  padding-top: 8px;
+}
+.figure-block > .caption-col .fig-tag {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0 0 6px;
+  font-weight: 500;
+}
+.figure-block > .caption-col h3 {
+  font-family: var(--f-display);
+  font-size: 22px;
+  line-height: 1.2;
+  margin: 0 0 10px;
+  color: var(--ink);
+}
+.figure-block > .caption-col p {
+  font-family: var(--f-body);
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--ink-soft);
+  margin: 0 0 10px;
+}
+.figure-block > .figure-col { min-width: 0; }
+.figure-block img.plain-img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 3px;
+  cursor: zoom-in;
+  transition: opacity 0.2s;
+}
+.figure-block img.plain-img:hover { opacity: 0.92; }
+@media (max-width: 900px) {
+  .figure-block { grid-template-columns: 1fr; grid-column: body-start / body-end; }
+  .figure-block > .caption-col { position: static; padding: 0 0 14px 0; }
+}
+
+/* ============================================================
+   Full-bleed figure (breakout wider than reading column, but padded)
+   ============================================================ */
+.bleed-fig {
+  grid-column: full-start / full-end;
+  margin: 64px 0;
+  position: relative;
+  padding: 0 var(--side);
+}
+.bleed-fig img {
+  display: block;
+  width: 100%;
+  max-width: 1600px;
+  height: auto;
+  margin: 0 auto;
+  cursor: zoom-in;
+  border-radius: 3px;
+}
+.bleed-fig .bleed-cap {
+  max-width: 1600px;
+  margin: 16px auto 0;
+  padding: 0;
+  font-family: var(--f-body);
+  font-size: 14.5px;
+  color: var(--ink-soft);
+  display: grid;
+  grid-template-columns: minmax(0, 140px) minmax(0, 1fr);
+  column-gap: 32px;
+}
+.bleed-fig .bleed-cap .fig-tag {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0;
+}
+.bleed-fig .bleed-cap p { margin: 0; }
+@media (max-width: 900px) {
+  .bleed-fig .bleed-cap { grid-template-columns: 1fr; }
+}
+
+/* ============================================================
+   Table-labeled sweep figure
+   ============================================================ */
+.table-fig {
+  display: grid;
+  grid-template-columns: 62px minmax(0, 1fr);
+  grid-template-rows: 42px minmax(0, 1fr);
+  gap: 4px 10px;
+  align-items: stretch;
+  background: var(--paper-alt);
+  padding: 12px 14px 14px;
+  border-radius: 4px;
+}
+.table-fig.wide-rows { grid-template-columns: 76px minmax(0, 1fr); }
+.table-fig .corner {
+  grid-row: 1;
+  grid-column: 1;
+  position: relative;
+  display: block;
+}
+.table-fig .corner svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  overflow: visible;
+}
+.table-fig .corner .diag { stroke: var(--ink-mute); stroke-width: 0.6; opacity: 0.6; }
+.table-fig .corner .lbl {
+  font-family: var(--f-body);       /* Newsreader — reliable Greek coverage */
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  fill: var(--ink-mute);
+  font-style: italic;
+  font-weight: 500;
+}
+.table-fig .col-headers {
+  grid-row: 1;
+  grid-column: 2;
+  display: grid;
+  gap: 2px;
+  font-family: var(--f-mono);
+  font-size: 12px;
+  color: var(--ink);
+  letter-spacing: 0.02em;
+  align-items: end;
+  padding-bottom: 4px;
+}
+.table-fig .col-headers span {
+  text-align: center;
+  align-self: end;
+  border-bottom: 1px solid var(--rule);
+  padding-bottom: 4px;
+}
+.table-fig .row-headers {
+  grid-row: 2;
+  grid-column: 1;
+  display: grid;
+  gap: 2px;
+  font-family: var(--f-mono);
+  font-size: 12px;
+  color: var(--ink);
+  letter-spacing: 0.02em;
+  padding-right: 6px;
+  border-right: 1px solid var(--rule);
+}
+.table-fig .row-headers span {
+  align-self: center;
+  text-align: right;
+}
+.table-fig .table-img {
+  grid-row: 2;
+  grid-column: 2;
+  cursor: zoom-in;
+}
+.table-fig .table-img img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 2px;
+  transition: opacity 0.2s;
+}
+.table-fig .table-img img:hover { opacity: 0.92; }
+
+/* ============================================================
+   CFG image-swap slider
+   ============================================================ */
+.cfg-fig .cfg-viewer {
+  background: var(--paper-alt);
+  border-radius: 4px;
+  padding: 10px 12px;
+  overflow: hidden;
+}
+.cfg-fig .cfg-viewer img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 2px;
+  cursor: zoom-in;
+  transition: opacity 0.15s;
+}
+.cfg-fig .cfg-row-labels {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 2px;
+  margin: 6px 0 0;
+  font-family: var(--f-mono);
+  font-size: 11.5px;
+  color: var(--ink-mute);
+  text-align: center;
+}
+.cfg-fig .cfg-slider-ui {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 14px;
+  align-items: center;
+  padding: 8px 14px;
+  background: var(--paper-alt);
+  border-radius: 3px;
+  font-family: var(--f-mono);
+  font-size: 12.5px;
+  color: var(--ink-soft);
+}
+.cfg-fig .cfg-slider-ui input[type="range"] {
+  accent-color: var(--accent);
+  height: 3px;
+  cursor: pointer;
+}
+.cfg-fig .cfg-slider-ui .value {
+  color: var(--accent);
+  font-weight: 500;
+  min-width: 3.5ch;
+  text-align: right;
+}
+
+/* ============================================================
+   Slerp slider (existing pattern)
+   ============================================================ */
+.slider-fig .track-viewer {
+  position: relative;
+  overflow: hidden;
+  background: var(--paper-alt);
+  border-radius: 3px;
+  max-width: 480px;
+}
+.slider-fig .slider-ui { max-width: 480px; }
+.slider-fig .track-viewer img {
+  display: block;
+  width: calc(var(--n-cols, 8) * 100%);
+  height: auto;
+  transform: translateX(calc(-1 * var(--col-idx, 0) * (100% / var(--n-cols, 8))));
+  /* No transition: dragging the slider swaps stops instantly. */
+  cursor: default;
+}
+.slider-ui {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 14px;
+  align-items: center;
+  padding: 8px 14px;
+  background: var(--paper-alt);
+  border-radius: 3px;
+  font-family: var(--f-mono);
+  font-size: 12.5px;
+  color: var(--ink-soft);
+}
+.slider-ui input[type="range"] {
+  accent-color: var(--accent);
+  height: 3px;
+  cursor: pointer;
+}
+.slider-ui .value {
+  color: var(--accent);
+  font-weight: 500;
+  min-width: 3.5ch;
+  text-align: right;
+}
+
+/* ============================================================
+   Interactive charts (shared styling)
+   ============================================================ */
+.chart-wrap {
+  position: relative;
+  background: var(--paper-alt);
+  border-radius: 6px;
+  padding: 24px 24px 16px;
+}
+.chart-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 24px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.chart-header h3 {
+  font-family: var(--f-display);
+  font-size: 22px;
+  margin: 0;
+}
+.chart-header .chart-note {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  color: var(--ink-mute);
+  letter-spacing: 0.04em;
+}
+.chart-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+  font-family: var(--f-mono);
+}
+.chart-svg .grid-line { stroke: var(--rule-soft); stroke-width: 1; }
+.chart-svg .axis-line { stroke: var(--rule); stroke-width: 1; }
+.chart-svg .tick-label { font-size: 10.5px; fill: var(--ink-mute); font-family: var(--f-mono); }
+.chart-svg .axis-label { font-size: 11px; fill: var(--ink-soft); font-family: var(--f-mono); letter-spacing: 0.06em; text-transform: uppercase; }
+.chart-svg .curve { fill: none; stroke-width: 2.2; stroke-linejoin: round; stroke-linecap: round; }
+.chart-svg .curve-backdrop { fill: none; stroke: var(--rule); stroke-width: 1; stroke-linejoin: round; }
+.chart-svg .dot { fill: var(--paper); stroke-width: 1.8; cursor: pointer; transition: r 0.12s; }
+.chart-svg .dot:hover { r: 6; }
+.chart-svg .winner { r: 5.5; }
+.chart-svg .callout-lbl {
+  font-family: var(--f-display);
+  font-size: 15px;
+  font-weight: 500;
+}
+.chart-svg .region-warmup { fill: var(--paper-warm); opacity: 0.5; }
+.chart-svg .region-label {
+  font-family: var(--f-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  fill: var(--ink-mute);
+}
+.chart-svg .series-lbl {
+  font-family: var(--f-body);       /* Newsreader — has Greek */
+  font-size: 13px;
+  font-weight: 500;
+  font-style: italic;
+}
+.chart-svg .legend-dot {
+  stroke-width: 2;
+  fill: var(--paper-alt);
+}
+.chart-svg .legend-txt {
+  font-family: var(--f-body);
+  font-size: 13px;
+  font-weight: 500;
+  font-style: italic;
+  fill: var(--ink);
+}
+.chart-tooltip {
+  position: absolute;
+  background: var(--ink);
+  color: var(--paper);
+  padding: 8px 12px;
+  border-radius: 3px;
+  font-family: var(--f-mono);
+  font-size: 12px;
+  line-height: 1.4;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s;
+  transform: translate(-50%, -100%);
+  white-space: nowrap;
+  z-index: 20;
+}
+.chart-tooltip::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-top-color: var(--ink);
+}
+.chart-tooltip strong { color: var(--accent-soft); }
+
+/* ============================================================
+   Stacked strips (trajectory + x_0 refinement, same-timestep)
+   ============================================================ */
+.stacked-strips { display: flex; flex-direction: column; gap: 14px; }
+.strip-with-label { display: flex; flex-direction: column; gap: 5px; }
+.strip-mini-label {
+  font-family: var(--f-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  color: var(--ink-mute);
+}
+.strip-mini-label em {
+  color: var(--accent);
+  font-style: italic;
+  font-family: var(--f-body);
+  font-size: 12px;
+  margin-right: 4px;
+}
+.stacked-strips img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 3px;
+  cursor: zoom-in;
+  transition: opacity 0.2s;
+}
+.stacked-strips img:hover { opacity: 0.92; }
+
+/* ============================================================
+   Halves figure (real vs generated)
+   ============================================================ */
+.halves-fig {
+  background: var(--paper-alt);
+  border-radius: 4px;
+  padding: 12px 14px 14px;
+}
+.halves-fig .halves-headers {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-family: var(--f-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+}
+.halves-fig .halves-headers .tag-real {
+  color: var(--ink);
+  border-bottom: 2px solid var(--accent-2);
+  padding-bottom: 4px;
+  text-align: center;
+}
+.halves-fig .halves-headers .tag-gen {
+  color: var(--ink);
+  border-bottom: 2px solid var(--accent);
+  padding-bottom: 4px;
+  text-align: center;
+}
+.halves-fig .halves-img {
+  position: relative;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.halves-fig .halves-img img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 2px;
+}
+.halves-fig .halves-divider {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  background: var(--paper);
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.06);
+  transform: translateX(-1px);
+  pointer-events: none;
+}
+
+/* ============================================================
+   Lightbox
+   ============================================================ */
+.lightbox {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 18, 15, 0.92);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 40px;
+  cursor: zoom-out;
+}
+.lightbox.open { display: flex; }
+.lightbox img {
+  max-width: 100%;
+  max-height: 100%;
+  display: block;
+  border-radius: 4px;
+}
+.lightbox-close {
+  position: absolute;
+  top: 20px;
+  right: 28px;
+  color: var(--paper);
+  font-family: var(--f-mono);
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.3);
+  padding: 6px 14px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+/* ============================================================
+   Scroll reveal
+   ============================================================ */
+.reveal {
+  opacity: 0;
+  transform: translateY(24px);
+  transition: opacity 0.7s cubic-bezier(0.2,0.7,0.2,1),
+              transform 0.7s cubic-bezier(0.2,0.7,0.2,1);
+}
+.reveal.in { opacity: 1; transform: none; }
+@media (prefers-reduced-motion: reduce) {
+  .reveal { opacity: 1; transform: none; transition: none; }
+}
+
+/* ============================================================
+   Coda
+   ============================================================ */
+.coda {
+  grid-column: body-start / body-end;
+  margin: 120px 0 20px;
+  padding: 40px;
+  background: var(--paper-alt);
+  border-radius: 4px;
+  border-left: 3px solid var(--accent);
+}
+.coda h3 { font-size: 22px; margin: 0 0 10px; }
+.coda p { font-size: 15.5px; margin: 0 0 12px; }
+.coda a { font-weight: 500; }
+
+footer {
+  grid-column: body-start / body-end;
+  margin-top: 40px;
+  padding-top: 24px;
+  border-top: 1px solid var(--rule-soft);
+  color: var(--ink-mute);
+  font-family: var(--f-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  text-align: center;
+}
+</style>
+</head>
+<body>
+
+<!-- ================================================================
+     HERO
+     ================================================================ -->
+<header class="hero">
+  <div class="hero-bg" aria-hidden="true"></div>
+  <div class="hero-vignette" aria-hidden="true"></div>
+
+  <nav class="hero-nav">
+    <a href="#dataset">Dataset</a>
+    <a href="#samplers">Samplers</a>
+    <a href="#quality">Quality</a>
+    <a href="architecture.html">Architecture ↗</a>
+    <a href="https://github.com/BenBenyamin/VerboseDiffusion" target="_blank" rel="noopener">GitHub ↗</a>
+  </nav>
+
+  <div class="hero-inner">
+    <div class="hero-tag">
+      <span class="dot"></span>
+      <span class="mono-small">AFHQ 512² &nbsp;·&nbsp; from scratch</span>
+    </div>
+
+    <div class="hero-titles">
+      <h1 class="hero-brand">VerboseDiffusion</h1>
+      <p class="hero-subtitle">A latent&nbsp;diffusion model, built <em>from&nbsp;scratch</em>.</p>
+      <p class="hero-byline">
+        <span class="by-prefix">by</span>
+        <span class="author-name">Ben Benyamin</span>
+        <span class="divider">·</span>
+        source on <a href="https://github.com/BenBenyamin/VerboseDiffusion" target="_blank" rel="noopener">GitHub ↗</a>
+      </p>
+    </div>
+
+    <div class="hero-meta">
+      <p class="lede">
+        ~30 M parameters, class-conditional on the three
+        <a href="https://github.com/clovaai/stargan-v2#animal-faces-hq-dataset-afhq">AFHQ</a>
+        classes (cat / dog / wild), trained on 15 k 512² images with
+        classifier-free guidance and sampled with DPM-Solver++ multistep.
+      </p>
+      <div class="stat-block">
+        <div class="stat-num">13.04</div>
+        <div class="stat-lbl">Best FID &nbsp;·&nbsp; step 50 k &nbsp;·&nbsp; N = 10,000</div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main>
+
+<!-- ================================================================
+     OVERVIEW
+     ================================================================ -->
+<section aria-label="Overview">
+  <span class="section-mark reveal">§ 01 — Overview</span>
+  <h2 class="reveal">The model, in a paragraph.</h2>
+  <div class="body reveal">
+    <p class="drop">
+      The core is a 4-level U-Net operating on 4-channel VAE latents of
+      the AFHQ 512² animal-faces dataset (~15 k images across cat, dog,
+      and wild) &mdash; encoded once with Stability's
+      <code>sd-vae-ft-mse</code>, cached to disk, then trained with
+      epsilon-prediction MSE and a cosine schedule at T = 1000. Attention
+      lives at the two deeper resolutions and through the bottleneck;
+      the top level stays convolutional. bfloat16 mixed precision is used
+      everywhere it&nbsp;can be, and the sampler is EMA-averaged with
+      decay 0.9999.
+    </p>
+    <p>
+      Everything below is the same model at rest &mdash; different sampler
+      choices, different noise seeds, different guidance scales.
+      The <a href="architecture.html">architecture page</a> walks through the
+      how.
+    </p>
+  </div>
+</section>
+
+<!-- ================================================================
+     DATASET
+     ================================================================ -->
+<section id="dataset" aria-label="Dataset">
+  <span class="section-mark reveal">§ 02 — Dataset</span>
+  <h2 class="reveal">AFHQ 512²: cat, dog, wild.</h2>
+  <div class="body reveal">
+    <p>
+      <strong>AFHQ</strong> (Animal Faces HQ, Choi et al. 2020) is a small,
+      curated corpus of <strong>15,803 tightly-cropped animal-face
+      photographs</strong> at 512×512 resolution, released alongside
+      StarGAN v2 as a cleaner alternative to CelebA for image-generation
+      research. It's partitioned into three balanced classes: <em>cat</em>,
+      <em>dog</em>, and <em>wild</em> (a mix of big cats, wolves, and foxes).
+    </p>
+    <p>
+      The combination — small size, high fidelity, three visually distinct
+      classes — makes AFHQ a natural fit for a from-scratch class-conditional
+      diffusion model. Training to a strong result fits on a single GPU,
+      and the three-class structure gives classifier-free guidance
+      something concrete to steer.
+    </p>
+  </div>
+
+  <div class="figure-block reveal">
+    <div class="caption-col">
+      <p class="fig-tag">Figure 1</p>
+      <h3>Real AFHQ samples.</h3>
+      <p>Twelve real images from the validation split &mdash; four per
+        class (cat / dog / wild). Random seeds, no filtering.</p>
+    </div>
+    <div class="figure-col">
+      <img class="plain-img" src="panels/panel_dataset.png" alt="Real AFHQ dataset samples." />
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================
+     WHAT IT MAKES
+     ================================================================ -->
+<section id="samples" aria-label="What it makes">
+  <span class="section-mark reveal">§ 03 — What it makes</span>
+  <h2 class="reveal">Class-conditional samples.</h2>
+  <div class="body reveal">
+    <p>
+      Three rows, eight seeds each, sampled at CFG = 3 with 30 steps of
+      DPM-Solver++ (2M). No cherry-picking; these are consecutive seeds
+      from the same call. The row structure comes from the class embedding
+      &mdash; a small <code>nn.Embedding(4, 256)</code> table that gets
+      added into the time embedding before every ResBlock's normalization.
+      Row identity, seed pose.
+    </p>
+  </div>
+
+  <figure class="bleed-fig reveal">
+    <img src="panels/panel_09_diversity.png" alt="Diversity grid." />
+    <div class="bleed-cap">
+      <p class="fig-tag">Figure 2</p>
+      <p>Rows: cat, dog, wild. Columns: eight independent noise seeds.
+        No prompt engineering &mdash; the model is class-conditional
+        with a 4-row embedding table and CFG scale 3.</p>
+    </div>
+  </figure>
+
+  <div class="body reveal">
+    <p>
+      When the initial noise is held constant across the three classes,
+      you can see how much of the "pose" comes from the seed and how much
+      of the "identity" comes from the class embedding.
+    </p>
+  </div>
+
+  <div class="figure-block reveal">
+    <div class="caption-col">
+      <p class="fig-tag">Figure 3</p>
+      <h3>Same&nbsp;noise, three&nbsp;classes.</h3>
+      <p>One initial <code>x_T</code>, three different class conditions.
+        Framing and lighting come from the noise; the species from the
+        class embedding.</p>
+    </div>
+    <div class="figure-col">
+      <img class="plain-img" src="panels/panel_08_same_seed.png" alt="Same seed × 3 classes." />
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================
+     HOW IT SAMPLES
+     ================================================================ -->
+<section id="samplers" aria-label="Sampler behavior">
+  <span class="section-mark reveal">§ 04 — How it samples</span>
+  <h2 class="reveal">Same model, many samplers.</h2>
+  <div class="body reveal">
+    <p>
+      The training objective doesn't care how you reverse the noising
+      process at inference. The same trained epsilon model can be sampled
+      as DDPM, DDIM, or any DPM-Solver variant &mdash; each is a different
+      numerical scheme applied to the probability-flow ODE. The three panels
+      below sweep the knobs.
+    </p>
+  </div>
+
+  <div class="figure-block reveal">
+    <div class="caption-col">
+      <p class="fig-tag">Figure 4</p>
+      <h3>DDPM ↔ DDIM: η&nbsp;sweep.</h3>
+      <p>Columns: η ∈ 0.0 – 1.0 in six stops. η = 0 is deterministic DDIM;
+        η = 1 recovers DDPM's stochastic Markov chain. Same seed per row.</p>
+    </div>
+    <div class="figure-col">
+      <div class="table-fig">
+        <div class="corner">
+          <svg viewBox="0 0 62 42" preserveAspectRatio="none" aria-hidden="true">
+            <line class="diag" x1="0" y1="42" x2="62" y2="0" />
+            <text class="lbl" x="58" y="12" text-anchor="end">η →</text>
+            <text class="lbl" x="4" y="36" text-anchor="start">↓ class</text>
+          </svg>
+        </div>
+        <div class="col-headers" style="grid-template-columns: repeat(6, 1fr);">
+          <span>0.0</span><span>0.2</span><span>0.4</span>
+          <span>0.6</span><span>0.8</span><span>1.0</span>
+        </div>
+        <div class="row-headers" style="grid-template-rows: repeat(3, 1fr);">
+          <span>cat</span><span>dog</span><span>wild</span>
+        </div>
+        <div class="table-img">
+          <img src="panels/panel_03_eta_sweep.png" alt="Eta sweep grid." />
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="body reveal" style="margin-top: 18px;">
+    <p>
+      <strong>What η actually controls.</strong> η is the "how much
+      fresh random noise the sampler injects at each step" knob.
+      At <em>η = 0</em> (DDIM) the sampler is fully deterministic —
+      fix the starting noise and you get the same image every run.
+      At <em>η = 1</em> (DDPM) fresh noise is added at every step,
+      so two runs with the same starting seed diverge into different
+      images of similar quality.
+    </p>
+    <p>
+      Why the rows still look nearly identical: at 100 steps the
+      per-step noise injection is small enough that the model absorbs
+      it. The visible difference between η values is in reproducibility
+      and per-sample diversity, not in per-sample fidelity.
+    </p>
+  </div>
+
+  <div class="figure-block reveal">
+    <div class="caption-col">
+      <p class="fig-tag">Figure 5</p>
+      <h3>DDIM step-count.</h3>
+      <p>Columns: n_steps ∈ {10, 20, 50, 100, 500, 1000}. 50 steps is
+        essentially indistinguishable from 1000; below 20 things begin
+        to fray.</p>
+    </div>
+    <div class="figure-col">
+      <div class="table-fig">
+        <div class="corner">
+          <svg viewBox="0 0 62 42" preserveAspectRatio="none" aria-hidden="true">
+            <line class="diag" x1="0" y1="42" x2="62" y2="0" />
+            <text class="lbl" x="58" y="12" text-anchor="end">steps →</text>
+            <text class="lbl" x="4" y="36" text-anchor="start">↓ class</text>
+          </svg>
+        </div>
+        <div class="col-headers" style="grid-template-columns: repeat(6, 1fr);">
+          <span>10</span><span>20</span><span>50</span>
+          <span>100</span><span>500</span><span>1000</span>
+        </div>
+        <div class="row-headers" style="grid-template-rows: repeat(3, 1fr);">
+          <span>cat</span><span>dog</span><span>wild</span>
+        </div>
+        <div class="table-img">
+          <img src="panels/panel_04_step_count.png" alt="DDIM step count sweep." />
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="figure-block reveal">
+    <div class="caption-col">
+      <p class="fig-tag">Figure 6</p>
+      <h3>DPM-Solver++ order&nbsp;sweep.</h3>
+      <p>Two-dimensional sweep. Rows: multistep order.
+        Columns: n_steps. Higher order helps up to about 3;
+        beyond that Adams–Bashforth coefficient magnitudes grow
+        and quality plateaus or degrades &mdash; the empirical
+        diminishing-returns story.</p>
+    </div>
+    <div class="figure-col">
+      <div class="table-fig">
+        <div class="corner">
+          <svg viewBox="0 0 62 42" preserveAspectRatio="none" aria-hidden="true">
+            <line class="diag" x1="0" y1="42" x2="62" y2="0" />
+            <text class="lbl" x="58" y="12" text-anchor="end">steps →</text>
+            <text class="lbl" x="4" y="36" text-anchor="start">↓ order</text>
+          </svg>
+        </div>
+        <div class="col-headers" style="grid-template-columns: repeat(4, 1fr);">
+          <span>10</span><span>25</span><span>50</span><span>100</span>
+        </div>
+        <div class="row-headers" style="grid-template-rows: repeat(6, 1fr);">
+          <span>1</span><span>2</span><span>3</span>
+          <span>4</span><span>5</span><span>10</span>
+        </div>
+        <div class="table-img">
+          <img src="panels/panel_05_dpmpp_order_sweep.png" alt="DPM++ order sweep 2D grid." />
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="body reveal" style="margin-top: 20px;">
+    <p>
+      <strong>On row 10.</strong> Rows 2 through 5 look identical because
+      the denoiser is <em>error-correcting</em> &mdash; each step pulls
+      the latent back to the data manifold, absorbing small solver errors.
+      Order 10 crosses out of that regime: its Adams&#8209;Bashforth
+      weights sum to <strong>~300</strong> in magnitude, and that
+      amplification pushes the latent outside the VAE decoder's training
+      distribution. The neon is the decoder saturating.
+    </p>
+    <p>
+      Neither more steps nor a different timestep spacing saves it &mdash;
+      the only real lever is <em>order</em> itself. The DPM-Solver++ paper
+      caps at 3 for this reason.
+    </p>
+  </div>
+</section>
+
+<!-- ================================================================
+     CONDITIONING (CFG + SLERP)
+     ================================================================ -->
+<section id="conditioning" aria-label="Conditioning">
+  <span class="section-mark reveal">§ 05 — Conditioning</span>
+  <h2 class="reveal">Guidance and the noise&nbsp;space.</h2>
+  <div class="body reveal">
+    <p>
+      Classifier-free guidance mixes the model's conditional and
+      unconditional epsilon predictions to steer samples toward
+      more prototypical class exemplars. Pushed too hard, the same
+      knob oversaturates colors and locks poses.
+    </p>
+  </div>
+
+  <figure class="figure-block cfg-fig reveal">
+    <div class="caption-col">
+      <p class="fig-tag">Figure 7</p>
+      <h3>CFG scale&nbsp;sweep.</h3>
+      <p>Drag the slider to sweep the guidance scale from 1 (no
+        guidance) through 10 (heavy oversaturation). Each stop
+        shows all three classes side-by-side, same seed throughout.</p>
+    </div>
+    <div class="figure-col">
+      <div class="cfg-viewer">
+        <img id="cfg-img" src="panels/panel_06_cfg_3.png"
+             alt="CFG value 3: cat, dog, wild side by side." />
+        <div class="cfg-row-labels">
+          <span>cat</span><span>dog</span><span>wild</span>
+        </div>
+      </div>
+      <div class="cfg-slider-ui">
+        <label for="cfg-slider">CFG</label>
+        <input id="cfg-slider" type="range" min="0" max="5" value="2" step="1"
+               oninput="setCfg(this.value)" />
+        <span class="value" id="cfg-value">3</span>
+      </div>
+    </div>
+  </figure>
+
+  <div class="body reveal" style="margin-top: 18px;">
+    <p>
+      <strong>What CFG actually does.</strong> During training, 10% of
+      samples had their class label dropped to a "null" class
+      (<code>uncond_prob = 0.1</code>). That taught the model two
+      predictions at once: one conditional on the class, one
+      unconditional. At sample time both get computed and mixed:
+      <code>ε = ε_uncond + w · (ε_cond − ε_uncond)</code>.
+    </p>
+    <p>
+      <em>w = 1</em> is pure conditional (no guidance nudge).
+      <em>w &gt; 1</em> extrapolates in the "make it more clearly this
+      class" direction — small values sharpen class features cleanly,
+      large values overshoot into oversaturated colors and locked poses.
+      There's no correct <em>w</em>: low is more faithful to the training
+      distribution, high is more visually punchy at the cost of realism.
+    </p>
+  </div>
+
+  <div class="body reveal">
+    <p>
+      With a class held fixed, the initial-noise manifold is smooth &mdash;
+      spherically-interpolating between two seeds walks the sampler through
+      a continuous morph of the same animal.
+    </p>
+  </div>
+
+  <figure class="figure-block slider-fig reveal">
+    <div class="caption-col">
+      <p class="fig-tag">Figure 8</p>
+      <h3>Noise SLERP.</h3>
+      <p>Fix the class, spherical-LERP between two random noise seeds
+        over eight stops. Drag the slider to walk α from 0 to 1.</p>
+    </div>
+    <div class="figure-col">
+      <div class="track-viewer" style="--n-cols: 8; --col-idx: 3;" id="slerp-viewer">
+        <img src="panels/panel_07_noise_slerp.png" alt="Noise SLERP strip." />
+      </div>
+      <div class="slider-ui">
+        <label for="slerp-slider">α</label>
+        <input id="slerp-slider" type="range" min="0" max="7" value="3" step="1"
+               oninput="setSlerpCol(this.value)" />
+        <span class="value" id="slerp-value">0.43</span>
+      </div>
+    </div>
+  </figure>
+
+  <div class="body reveal" style="margin-top: 18px;">
+    <p>
+      <strong>What you're seeing.</strong> Two random noise samples <em>A</em>
+      and <em>B</em> are drawn from <code>N(0, I)</code>. The slider walks
+      a parameter α from 0 to 1 that interpolates the sampler's
+      <em>starting noise</em> between them &mdash; at α = 0 the sampler
+      starts from A, at α = 1 from B, in between from a mixture. Class
+      held fixed. Same everything downstream; only the initial noise
+      changes.
+    </p>
+    <p>
+      <strong>Why "spherical" and not plain linear interpolation.</strong>
+      The magnitude of the noise vector is what defines the starting
+      noise level. Averaging two Gaussian vectors linearly shrinks their
+      magnitude near the midpoint, so at α = 0.5 the sampler would start
+      from an unusually-clean latent it was never trained to denoise.
+      Spherical LERP walks along the sphere of constant magnitude, so
+      every interpolated noise has the same "size" as A and B, staying
+      inside the model's training distribution.
+    </p>
+    <p>
+      The takeaway is that <em>noise space is smooth</em>: two random
+      noises produce two different animals of the same class;
+      interpolating between the noises interpolates continuously between
+      those animals, without ever producing a broken sample. The whole
+      strip is one continuous manifold.
+    </p>
+  </div>
+</section>
+
+<!-- ================================================================
+     EDITING
+     ================================================================ -->
+<section id="editing" aria-label="Editing">
+  <span class="section-mark reveal">§ 06 — Editing</span>
+  <h2 class="reveal">SDEdit: noise as an edit&nbsp;strength.</h2>
+  <div class="body reveal">
+    <p>
+      Give the model a real image, corrupt it with noise up to
+      timestep <em>t</em>, then run the reverse process from
+      there. Small <em>t</em>: model tweaks. Large <em>t</em>: the
+      original barely survives &mdash; closer to generating from
+      scratch than editing.
+    </p>
+  </div>
+  <div class="figure-block reveal">
+    <div class="caption-col">
+      <p class="fig-tag">Figure 9</p>
+      <h3>SDEdit.</h3>
+      <p>Rows: one real AFHQ input per class. Columns: <em>original</em>,
+        then paired (<em>noised at t</em>, <em>denoised from t</em>) for
+        t ∈ {250, 500, 750}.</p>
+    </div>
+    <div class="figure-col">
+      <img class="plain-img" src="panels/panel_13_sdedit.png" alt="SDEdit at multiple noise levels." />
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================
+     DIFFUSION MECHANICS
+     ================================================================ -->
+<section id="diffusion" aria-label="Diffusion mechanics">
+  <span class="section-mark reveal">§ 07 — Mechanics</span>
+  <h2 class="reveal">The reverse process, in&nbsp;pictures.</h2>
+  <div class="body reveal">
+    <p>
+      Sampling is a walk from pure noise back to data along a schedule of
+      log signal-to-noise ratios. Two views of the same walk: the raw
+      latent <code>x_t</code>, and the model's implicit best guess of the
+      clean image at each step, <code>x_0 = (x_t − σ·ε) / α</code>.
+    </p>
+  </div>
+
+  <div class="figure-block reveal">
+    <div class="caption-col">
+      <p class="fig-tag">Figure 10</p>
+      <h3>Trajectory &amp; x_0 refinement.</h3>
+      <p>Two views of the same sampling run, column-aligned by
+        timestep. Top: the raw noisy latent <code>x_t</code> the
+        sampler is carrying. Bottom: the model's own guess of what
+        the clean image is at each of those steps.</p>
+    </div>
+    <div class="figure-col">
+      <div class="stacked-strips">
+        <div class="strip-with-label">
+          <span class="strip-mini-label"><em>x_t</em> · noisy latent (input)</span>
+          <img class="plain-img" src="panels/panel_01_trajectory.png" alt="Denoising trajectory: x_t over 8 timesteps." />
+        </div>
+        <div class="strip-with-label">
+          <span class="strip-mini-label"><em>x̂₀</em> · model's clean-image estimate (output)</span>
+          <img class="plain-img" src="panels/panel_02_x0_refine.png" alt="x_0 refinement: model's clean estimate at each step." />
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="body reveal" style="margin-top: 20px;">
+    <p>
+      <strong>How the two rows relate.</strong> Same eight timesteps,
+      same seed. The top row is what the sampler is holding at that
+      moment &mdash; a partially-noised latent. The bottom row is what
+      the model <em>predicts</em> the clean version to be, given that
+      input: <code>x̂₀ = (x_t − σ_t · ε̂) / α_t</code>.
+    </p>
+    <p>
+      Each column of the bottom row is <em>exactly</em> what the model
+      was trained to do &mdash; given a noisy sample at some noise
+      level, predict the clean version. Sampling is nothing more than
+      chaining those single-step predictions together: each step's
+      <code>x̂₀</code> is used by the sampler to compute the next
+      step's <code>x_t</code>, and around we go.
+    </p>
+  </div>
+
+  <div class="figure-block reveal">
+    <div class="caption-col">
+      <p class="fig-tag">Figure 11</p>
+      <h3>Noise schedule.</h3>
+      <p>Cosine schedule with <code>sched_min = 0.02</code>,
+        <code>sched_max = 0.95</code>. α does not reach 1 at t = 0,
+        which is why the sampler returns the final <code>x_0</code>
+        prediction instead of <code>x_t</code>. Hover the curves for
+        exact values.</p>
+    </div>
+    <div class="figure-col">
+      <div class="chart-wrap">
+        <div class="chart-header">
+          <h3>α(t), σ(t) &amp; log&nbsp;SNR(t)</h3>
+          <div class="chart-note">cosine schedule &nbsp;·&nbsp; T = 1000</div>
+        </div>
+        <svg id="schedule-chart" class="chart-svg" viewBox="0 0 900 320" preserveAspectRatio="xMidYMid meet"></svg>
+        <div class="chart-tooltip" id="schedule-tooltip"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================
+     QUALITY
+     ================================================================ -->
+<section id="quality" aria-label="Quality">
+  <span class="section-mark reveal">§ 08 — Quality</span>
+  <h2 class="reveal">How good is it, actually?</h2>
+  <div class="body reveal">
+    <p>
+      FID (Fréchet Inception Distance) is the field standard for
+      measuring how close a generator's output distribution is to a
+      reference distribution &mdash; here, the AFHQ training set.
+      Lower is better; a few points of gap is real.
+    </p>
+    <p>
+      Hover any chart to inspect exact values.
+    </p>
+  </div>
+
+  <div class="figure-block reveal">
+    <div class="caption-col">
+      <p class="fig-tag">Figure 12</p>
+      <h3>FID across training.</h3>
+      <p>20 checkpoints, one FID measurement each at N = 10,000 samples.
+        Warm-up region shaded; winner called out.</p>
+    </div>
+    <div class="figure-col">
+      <div class="chart-wrap">
+        <div class="chart-header">
+          <h3>FID across 20 training checkpoints</h3>
+          <div class="chart-note">CFG = 3.0  ·  DPM++ 2M @ 30 steps  ·  N = 10,000</div>
+        </div>
+        <svg id="fid-chart" class="chart-svg" viewBox="0 0 900 380" preserveAspectRatio="xMidYMid meet"></svg>
+        <div class="chart-tooltip" id="fid-tooltip"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="figure-block reveal">
+    <div class="caption-col">
+      <p class="fig-tag">Figure 13</p>
+      <h3>FID vs sample count.</h3>
+      <p>FID at small N is biased and noisy. Every checkpoint here
+        was measured at N = 500, 1 k, 2 k, 5 k, 10 k &mdash; the curves
+        flatten by 5 k. Highlighted lines are representative
+        checkpoints; the gray backdrop is every other checkpoint.</p>
+    </div>
+    <div class="figure-col">
+      <div class="chart-wrap">
+        <div class="chart-header">
+          <h3>FID vs sample count</h3>
+          <div class="chart-note">20 checkpoints  ·  N ∈ {500, 1 k, 2 k, 5 k, 10 k}</div>
+        </div>
+        <svg id="convergence-chart" class="chart-svg" viewBox="0 0 900 400" preserveAspectRatio="xMidYMid meet"></svg>
+        <div class="chart-tooltip" id="convergence-tooltip"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="figure-block reveal">
+    <div class="caption-col">
+      <p class="fig-tag">Figure 14</p>
+      <h3>Samplers vs&nbsp;steps.</h3>
+      <p>Three samplers at five step counts. At low step counts the
+        higher-order DPM++ variants open a gap; by 100+ steps
+        everything converges.</p>
+    </div>
+    <div class="figure-col">
+      <div class="chart-wrap">
+        <div class="chart-header">
+          <h3>FID vs sampling steps, across samplers</h3>
+          <div class="chart-note">step 50 k ckpt  ·  N = 3,000  ·  CFG = 3.0</div>
+        </div>
+        <svg id="sampler-chart" class="chart-svg" viewBox="0 0 900 340" preserveAspectRatio="xMidYMid meet"></svg>
+        <div class="chart-tooltip" id="sampler-tooltip"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="figure-block reveal">
+    <div class="caption-col">
+      <p class="fig-tag">Figure 15</p>
+      <h3>Real vs&nbsp;generated.</h3>
+      <p>Each row: real AFHQ validation images on the left half,
+        model generations on the right. The ground-truth check.</p>
+    </div>
+    <div class="figure-col">
+      <div class="halves-fig">
+        <div class="halves-headers">
+          <span class="tag-real">real  ·  AFHQ val</span>
+          <span class="tag-gen">generated  ·  DPM++ 2M @ 30 steps</span>
+        </div>
+        <div class="halves-img">
+          <img class="plain-img" src="panels/panel_11_real_vs_gen.png" alt="Real vs generated." />
+          <div class="halves-divider" aria-hidden="true"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================
+     CODA
+     ================================================================ -->
+<div class="coda reveal">
+  <h3>Under the hood.</h3>
+  <p>
+    The full architecture &mdash; UNet block topology, the training loop,
+    the sampler math, design decisions, and a config reference &mdash;
+    lives in a companion page.
+  </p>
+  <p>
+    <a href="architecture.html">Read the architecture doc →</a>
+  </p>
+</div>
+
+<footer>
+  All panels pre-rendered · static page · Ben Benyamin ·
+  <a href="https://github.com/BenBenyamin/VerboseDiffusion" target="_blank" rel="noopener" style="color: var(--accent);">github.com/BenBenyamin/VerboseDiffusion</a>
+</footer>
+
+</main>
+
+<!-- Lightbox -->
+<div class="lightbox" id="lightbox" onclick="closeLightbox(event)">
+  <button class="lightbox-close" onclick="closeLightbox(event)">Close · Esc</button>
+  <img id="lightbox-img" alt="" />
+</div>
+
+<script>
+/* =============================================================
+   DATA
+   ============================================================= */
+
+/* Panel 14 – FID across 20 checkpoints at N=10k (from panel_14b @ N=10000) */
+const FID_DATA = [
+  { step:   5000, fid: 295.15 }, { step:  10000, fid: 251.76 },
+  { step:  15000, fid: 275.28 }, { step:  20000, fid: 238.57 },
+  { step:  25000, fid: 110.66 }, { step:  30000, fid:  47.65 },
+  { step:  35000, fid:  25.54 }, { step:  40000, fid:  17.66 },
+  { step:  45000, fid:  13.90 }, { step:  50000, fid:  13.04 },
+  { step:  55000, fid:  13.61 }, { step:  60000, fid:  13.67 },
+  { step:  65000, fid:  14.08 }, { step:  70000, fid:  14.59 },
+  { step:  75000, fid:  14.91 }, { step:  80000, fid:  15.55 },
+  { step:  85000, fid:  15.56 }, { step:  90000, fid:  15.82 },
+  { step:  95000, fid:  15.74 }, { step: 100000, fid:  15.94 },
+];
+
+/* Panel 14b – FID convergence with sample count for all 20 ckpts */
+const CONVERGENCE_DATA = {
+    5000: [[500,304.03],[1000,299.71],[2000,297.75],[5000,295.66],[10000,295.15]],
+   10000: [[500,263.09],[1000,257.77],[2000,254.04],[5000,252.38],[10000,251.76]],
+   15000: [[500,290.75],[1000,283.32],[2000,278.34],[5000,275.64],[10000,275.28]],
+   20000: [[500,255.80],[1000,248.64],[2000,240.69],[5000,238.41],[10000,238.57]],
+   25000: [[500,127.88],[1000,119.35],[2000,113.49],[5000,110.00],[10000,110.66]],
+   30000: [[500, 64.53],[1000, 57.09],[2000, 51.79],[5000, 47.73],[10000, 47.65]],
+   35000: [[500, 43.64],[1000, 35.54],[2000, 29.90],[5000, 26.22],[10000, 25.54]],
+   40000: [[500, 35.90],[1000, 27.20],[2000, 21.64],[5000, 18.36],[10000, 17.66]],
+   45000: [[500, 31.61],[1000, 23.33],[2000, 17.75],[5000, 14.61],[10000, 13.90]],
+   50000: [[500, 30.93],[1000, 22.64],[2000, 17.01],[5000, 13.84],[10000, 13.04]],
+   55000: [[500, 32.02],[1000, 23.44],[2000, 17.78],[5000, 14.66],[10000, 13.61]],
+   60000: [[500, 31.66],[1000, 23.35],[2000, 17.82],[5000, 14.63],[10000, 13.67]],
+   65000: [[500, 31.84],[1000, 23.30],[2000, 17.88],[5000, 14.86],[10000, 14.08]],
+   70000: [[500, 32.08],[1000, 23.47],[2000, 18.28],[5000, 15.33],[10000, 14.59]],
+   75000: [[500, 32.84],[1000, 24.19],[2000, 18.73],[5000, 15.73],[10000, 14.91]],
+   80000: [[500, 33.41],[1000, 24.83],[2000, 19.33],[5000, 16.39],[10000, 15.55]],
+   85000: [[500, 32.90],[1000, 24.65],[2000, 19.35],[5000, 16.30],[10000, 15.56]],
+   90000: [[500, 33.51],[1000, 25.23],[2000, 19.67],[5000, 16.67],[10000, 15.82]],
+   95000: [[500, 32.76],[1000, 24.65],[2000, 19.35],[5000, 16.51],[10000, 15.74]],
+  100000: [[500, 33.25],[1000, 24.76],[2000, 19.28],[5000, 16.70],[10000, 15.94]],
+};
+
+/* Panel 10 – FID vs sampling steps, three samplers */
+const SAMPLER_DATA = {
+  "DDIM η=0":   [[10,20.54],[20,17.38],[40,16.00],[100,15.20],[500,14.83]],
+  "DPM++ 2M":   [[10,19.12],[20,16.65],[40,15.60],[100,15.11],[500,14.82]],
+  "DPM++ 3M":   [[10,18.65],[20,16.48],[40,15.56],[100,15.07],[500,14.82]],
+};
+const SAMPLER_COLORS = {
+  "DDIM η=0":  "var(--ink-mute)",
+  "DPM++ 2M":  "var(--accent)",
+  "DPM++ 3M":  "var(--accent-2)",
+};
+
+/* CFG slider — filenames match viz/tools/slice_cfg.py output */
+const CFG_VALUES = [1, 2, 3, 5, 7, 10];
+
+/* =============================================================
+   Helpers
+   ============================================================= */
+function positionTooltip(tt, wrap, svg, cx, cy) {
+  const svgRect = svg.getBoundingClientRect();
+  const wrapRect = wrap.getBoundingClientRect();
+  const scaleX = svgRect.width / svg.viewBox.baseVal.width;
+  const scaleY = svgRect.height / svg.viewBox.baseVal.height;
+  const px = svgRect.left - wrapRect.left + cx * scaleX;
+  const py = svgRect.top - wrapRect.top + cy * scaleY - 8;
+  tt.style.left = px + "px";
+  tt.style.top = py + "px";
+}
+
+/* =============================================================
+   FID across checkpoints  (line + bars)
+   ============================================================= */
+function buildFidChart() {
+  const svg = document.getElementById("fid-chart");
+  const W = 900, H = 380;
+  const M = { top: 24, right: 36, bottom: 44, left: 56 };
+
+  const steps = FID_DATA.map(d => d.step);
+  const fids  = FID_DATA.map(d => d.fid);
+  const xMin = Math.min(...steps), xMax = Math.max(...steps);
+  const logY = v => Math.log10(v);
+  const yLo = logY(10), yHi = logY(320);
+
+  const sx = s => M.left + (s - xMin) / (xMax - xMin) * (W - M.left - M.right);
+  const sy = v => M.top + (yHi - logY(v)) / (yHi - yLo) * (H - M.top - M.bottom);
+
+  const warmUpEnd = 25000;
+  let out = "";
+  out += `<rect class="region-warmup" x="${sx(xMin)}" y="${M.top}" width="${sx(warmUpEnd) - sx(xMin)}" height="${H - M.top - M.bottom}" />`;
+  out += `<text class="region-label" x="${(sx(xMin)+sx(warmUpEnd))/2}" y="${M.top + 14}" text-anchor="middle">warm-up</text>`;
+
+  const yTicks = [10, 20, 50, 100, 300];
+  yTicks.forEach(v => {
+    const y = sy(v);
+    out += `<line class="grid-line" x1="${M.left}" y1="${y}" x2="${W - M.right}" y2="${y}" />`;
+    out += `<text class="tick-label" x="${M.left - 8}" y="${y + 3}" text-anchor="end">${v}</text>`;
+  });
+  [5000, 25000, 50000, 75000, 100000].forEach(s => {
+    out += `<text class="tick-label" x="${sx(s)}" y="${H - M.bottom + 16}" text-anchor="middle">${s/1000}k</text>`;
+  });
+
+  out += `<line class="axis-line" x1="${M.left}" y1="${M.top}" x2="${M.left}" y2="${H - M.bottom}" />`;
+  out += `<line class="axis-line" x1="${M.left}" y1="${H - M.bottom}" x2="${W - M.right}" y2="${H - M.bottom}" />`;
+  out += `<text class="axis-label" x="${M.left}" y="${H - 8}">Training step</text>`;
+  out += `<text class="axis-label" x="${M.left - 40}" y="${M.top}" transform="rotate(-90 ${M.left - 40} ${M.top})">FID (log)</text>`;
+
+  const path = FID_DATA.map((d,i) => `${i?"L":"M"}${sx(d.step).toFixed(1)},${sy(d.fid).toFixed(1)}`).join(" ");
+  out += `<path class="curve" d="${path}" stroke="var(--accent)" />`;
+
+  const winMin = Math.min(...fids);
+  FID_DATA.forEach(d => {
+    const win = d.fid === winMin;
+    out += `<circle class="dot${win?" winner":""}" cx="${sx(d.step).toFixed(1)}" cy="${sy(d.fid).toFixed(1)}" r="4" stroke="var(--accent)" ${win?'fill="var(--accent)"':''} data-step="${d.step}" data-fid="${d.fid.toFixed(2)}"></circle>`;
+  });
+
+  const win = FID_DATA.reduce((a,b) => a.fid < b.fid ? a : b);
+  out += `<line x1="${sx(win.step)}" y1="${sy(win.fid) - 12}" x2="${sx(win.step)}" y2="${sy(win.fid) - 32}" stroke="var(--accent)" stroke-width="1" stroke-dasharray="2 3" />`;
+  out += `<text class="callout-lbl" fill="var(--accent)" x="${sx(win.step)}" y="${sy(win.fid) - 40}" text-anchor="middle">${win.fid.toFixed(2)} @ ${win.step/1000}k</text>`;
+
+  svg.innerHTML = out;
+  const tt = document.getElementById("fid-tooltip");
+  const wrap = svg.parentElement;
+  svg.querySelectorAll(".dot").forEach(dot => {
+    dot.addEventListener("mouseenter", () => {
+      const step = +dot.dataset.step, fid = dot.dataset.fid;
+      tt.innerHTML = `<strong>step ${step.toLocaleString()}</strong><br>FID = ${fid}`;
+      positionTooltip(tt, wrap, svg, +dot.getAttribute("cx"), +dot.getAttribute("cy"));
+      tt.style.opacity = 1;
+    });
+    dot.addEventListener("mouseleave", () => { tt.style.opacity = 0; });
+  });
+}
+
+/* =============================================================
+   FID convergence with sample count
+   ============================================================= */
+function buildConvergenceChart() {
+  const svg = document.getElementById("convergence-chart");
+  const W = 900, H = 400;
+  const M = { top: 30, right: 90, bottom: 44, left: 56 };
+
+  const allSteps = Object.keys(CONVERGENCE_DATA).map(Number).sort((a,b) => a - b);
+  const highlight = [5000, 25000, 40000, 50000, 75000, 100000];
+
+  const logX = v => Math.log10(v);
+  const logY = v => Math.log10(v);
+  const xLo = logX(500), xHi = logX(10000);
+  const yLo = logY(12),  yHi = logY(320);
+
+  const sx = v => M.left + (logX(v) - xLo) / (xHi - xLo) * (W - M.left - M.right);
+  const sy = v => M.top + (yHi - logY(v)) / (yHi - yLo) * (H - M.top - M.bottom);
+
+  const cmap = (i, n) => {
+    /* Warm viridis-ish stops from dark plum → warm terracotta → soft gold */
+    const stops = ["#2b1e3c", "#4a3a63", "#6f4a5b", "#a26247", "#c4864a", "#c8a94c"];
+    return stops[Math.round(i / Math.max(n - 1, 1) * (stops.length - 1))];
+  };
+
+  let out = "";
+
+  const yTicks = [12, 20, 50, 100, 300];
+  yTicks.forEach(v => {
+    const y = sy(v);
+    out += `<line class="grid-line" x1="${M.left}" y1="${y}" x2="${W - M.right}" y2="${y}" />`;
+    out += `<text class="tick-label" x="${M.left - 8}" y="${y + 3}" text-anchor="end">${v}</text>`;
+  });
+  [500, 1000, 2000, 5000, 10000].forEach(v => {
+    out += `<text class="tick-label" x="${sx(v)}" y="${H - M.bottom + 16}" text-anchor="middle">${v >= 1000 ? (v/1000)+"k" : v}</text>`;
+  });
+  out += `<line class="axis-line" x1="${M.left}" y1="${M.top}" x2="${M.left}" y2="${H - M.bottom}" />`;
+  out += `<line class="axis-line" x1="${M.left}" y1="${H - M.bottom}" x2="${W - M.right}" y2="${H - M.bottom}" />`;
+  out += `<text class="axis-label" x="${M.left}" y="${H - 8}">Sample count N (log)</text>`;
+  out += `<text class="axis-label" x="${M.left - 40}" y="${M.top}" transform="rotate(-90 ${M.left - 40} ${M.top})">FID (log)</text>`;
+
+  /* Backdrop: all non-highlighted checkpoints */
+  allSteps.forEach(step => {
+    if (highlight.includes(step)) return;
+    const pts = CONVERGENCE_DATA[step];
+    const d = pts.map((p,i) => `${i?"L":"M"}${sx(p[0]).toFixed(1)},${sy(p[1]).toFixed(1)}`).join(" ");
+    out += `<path class="curve-backdrop" d="${d}" />`;
+  });
+
+  /* Highlighted lines + points */
+  highlight.forEach((step, i) => {
+    const pts = CONVERGENCE_DATA[step];
+    if (!pts) return;
+    const color = cmap(i, highlight.length);
+    const d = pts.map((p,idx) => `${idx?"L":"M"}${sx(p[0]).toFixed(1)},${sy(p[1]).toFixed(1)}`).join(" ");
+    out += `<path class="curve" d="${d}" stroke="${color}" />`;
+    pts.forEach(p => {
+      out += `<circle class="dot" cx="${sx(p[0]).toFixed(1)}" cy="${sy(p[1]).toFixed(1)}" r="4" stroke="${color}" data-step="${step}" data-n="${p[0]}" data-fid="${p[1].toFixed(2)}"></circle>`;
+    });
+    const last = pts[pts.length - 1];
+    const lx = sx(last[0]) + 8, ly = sy(last[1]) + 4;
+    out += `<text class="series-lbl" fill="${color}" x="${lx.toFixed(1)}" y="${ly.toFixed(1)}">${step/1000}k</text>`;
+  });
+
+  svg.innerHTML = out;
+
+  const tt = document.getElementById("convergence-tooltip");
+  const wrap = svg.parentElement;
+  svg.querySelectorAll(".dot").forEach(dot => {
+    dot.addEventListener("mouseenter", () => {
+      const step = +dot.dataset.step, n = +dot.dataset.n, fid = dot.dataset.fid;
+      tt.innerHTML = `<strong>step ${step/1000}k · N = ${n.toLocaleString()}</strong><br>FID = ${fid}`;
+      positionTooltip(tt, wrap, svg, +dot.getAttribute("cx"), +dot.getAttribute("cy"));
+      tt.style.opacity = 1;
+    });
+    dot.addEventListener("mouseleave", () => { tt.style.opacity = 0; });
+  });
+}
+
+/* =============================================================
+   FID vs sampling steps (three samplers)
+   ============================================================= */
+function buildSamplerChart() {
+  const svg = document.getElementById("sampler-chart");
+  const W = 900, H = 360;
+  const M = { top: 60, right: 42, bottom: 44, left: 56 };  /* extra top for legend */
+
+  const allPts = Object.values(SAMPLER_DATA).flat();
+  const xMin = 8, xMax = 550;
+  const yPad = 0.8;
+  const yMin = Math.min(...allPts.map(p => p[1])) - yPad;
+  const yMax = Math.max(...allPts.map(p => p[1])) + yPad;
+
+  const logX = v => Math.log10(v);
+  const xLo = logX(xMin), xHi = logX(xMax);
+  const sx = v => M.left + (logX(v) - xLo) / (xHi - xLo) * (W - M.left - M.right);
+  const sy = v => M.top + (yMax - v) / (yMax - yMin) * (H - M.top - M.bottom);
+
+  let out = "";
+
+  /* --- Top legend row (replaces the collision-prone end-labels) --- */
+  const entries = Object.entries(SAMPLER_DATA);
+  const legendY = 24;
+  const legendGap = 190;
+  const legendStart = M.left;
+  entries.forEach(([label, _], i) => {
+    const cx = legendStart + i * legendGap;
+    const color = SAMPLER_COLORS[label];
+    out += `<line x1="${cx}" y1="${legendY}" x2="${cx + 22}" y2="${legendY}" stroke="${color}" stroke-width="2.2" />`;
+    out += `<circle class="legend-dot" cx="${cx + 11}" cy="${legendY}" r="4" stroke="${color}" />`;
+    out += `<text class="legend-txt" x="${cx + 32}" y="${legendY + 4}">${label}</text>`;
+  });
+
+  /* Y-axis ticks (linear, nice values) */
+  const yStep = 1;
+  for (let v = Math.ceil(yMin); v <= yMax; v += yStep) {
+    const y = sy(v);
+    out += `<line class="grid-line" x1="${M.left}" y1="${y}" x2="${W - M.right}" y2="${y}" />`;
+    out += `<text class="tick-label" x="${M.left - 8}" y="${y + 3}" text-anchor="end">${v}</text>`;
+  }
+  [10, 20, 40, 100, 500].forEach(v => {
+    out += `<text class="tick-label" x="${sx(v)}" y="${H - M.bottom + 16}" text-anchor="middle">${v}</text>`;
+  });
+  out += `<line class="axis-line" x1="${M.left}" y1="${M.top}" x2="${M.left}" y2="${H - M.bottom}" />`;
+  out += `<line class="axis-line" x1="${M.left}" y1="${H - M.bottom}" x2="${W - M.right}" y2="${H - M.bottom}" />`;
+  out += `<text class="axis-label" x="${M.left}" y="${H - 8}">Sampling steps (log)</text>`;
+  out += `<text class="axis-label" x="${M.left - 40}" y="${M.top}" transform="rotate(-90 ${M.left - 40} ${M.top})">FID</text>`;
+
+  entries.forEach(([label, pts]) => {
+    const color = SAMPLER_COLORS[label];
+    const d = pts.map((p,i) => `${i?"L":"M"}${sx(p[0]).toFixed(1)},${sy(p[1]).toFixed(1)}`).join(" ");
+    out += `<path class="curve" d="${d}" stroke="${color}" />`;
+    pts.forEach(p => {
+      out += `<circle class="dot" cx="${sx(p[0]).toFixed(1)}" cy="${sy(p[1]).toFixed(1)}" r="4" stroke="${color}" data-label="${label}" data-n="${p[0]}" data-fid="${p[1].toFixed(2)}"></circle>`;
+    });
+  });
+
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.innerHTML = out;
+
+  const tt = document.getElementById("sampler-tooltip");
+  const wrap = svg.parentElement;
+  svg.querySelectorAll(".dot").forEach(dot => {
+    dot.addEventListener("mouseenter", () => {
+      const label = dot.dataset.label, n = +dot.dataset.n, fid = dot.dataset.fid;
+      tt.innerHTML = `<strong>${label} · ${n} steps</strong><br>FID = ${fid}`;
+      positionTooltip(tt, wrap, svg, +dot.getAttribute("cx"), +dot.getAttribute("cy"));
+      tt.style.opacity = 1;
+    });
+    dot.addEventListener("mouseleave", () => { tt.style.opacity = 0; });
+  });
+}
+
+/* =============================================================
+   Noise schedule chart (cosine)
+   ============================================================= */
+function buildScheduleChart() {
+  const svg = document.getElementById("schedule-chart");
+  const W = 900, H = 320;
+  const M = { top: 26, right: 130, bottom: 42, left: 52 };
+
+  const T = 1000, SCHED_MIN = 0.02, SCHED_MAX = 0.95;
+  const startAngle = Math.acos(SCHED_MAX);
+  const endAngle   = Math.acos(SCHED_MIN);
+  const step = (endAngle - startAngle) / (T - 1);
+
+  const alpha = new Array(T), sigma = new Array(T), logSnr = new Array(T);
+  for (let t = 0; t < T; t++) {
+    const a = startAngle + step * t;
+    alpha[t] = Math.cos(a);
+    sigma[t] = Math.sin(a);
+    logSnr[t] = 2 * Math.log10(alpha[t] / sigma[t]);
+  }
+
+  const sx = t => M.left + (t / (T - 1)) * (W - M.left - M.right);
+
+  /* Left axis: 0..1 for α and σ.  Right axis: log-SNR range */
+  const yL_min = 0, yL_max = 1;
+  const yR_min = Math.min(...logSnr), yR_max = Math.max(...logSnr);
+
+  const syL = v => M.top + (yL_max - v) / (yL_max - yL_min) * (H - M.top - M.bottom);
+  const syR = v => M.top + (yR_max - v) / (yR_max - yR_min) * (H - M.top - M.bottom);
+
+  let out = "";
+
+  /* Grid + ticks (left axis, linear 0..1) */
+  [0, 0.25, 0.5, 0.75, 1].forEach(v => {
+    const y = syL(v);
+    out += `<line class="grid-line" x1="${M.left}" y1="${y}" x2="${W - M.right}" y2="${y}" />`;
+    out += `<text class="tick-label" x="${M.left - 8}" y="${y + 3}" text-anchor="end">${v.toFixed(2)}</text>`;
+  });
+  [0, 250, 500, 750, 999].forEach(t => {
+    out += `<text class="tick-label" x="${sx(t)}" y="${H - M.bottom + 16}" text-anchor="middle">${t}</text>`;
+  });
+
+  /* Right axis ticks (log-SNR) */
+  const rightTicks = [Math.ceil(yR_min), 0, Math.floor(yR_max)].filter((v,i,a) => a.indexOf(v) === i);
+  rightTicks.forEach(v => {
+    const y = syR(v);
+    out += `<text class="tick-label" x="${W - M.right + 8}" y="${y + 3}" text-anchor="start" fill="var(--accent-3)">${v.toFixed(0)}</text>`;
+  });
+
+  out += `<line class="axis-line" x1="${M.left}" y1="${M.top}" x2="${M.left}" y2="${H - M.bottom}" />`;
+  out += `<line class="axis-line" x1="${M.left}" y1="${H - M.bottom}" x2="${W - M.right}" y2="${H - M.bottom}" />`;
+  out += `<line class="axis-line" x1="${W - M.right}" y1="${M.top}" x2="${W - M.right}" y2="${H - M.bottom}" stroke="var(--rule-soft)" />`;
+  out += `<text class="axis-label" x="${M.left}" y="${H - 8}">timestep t</text>`;
+  out += `<text class="axis-label" x="${M.left - 40}" y="${M.top}" transform="rotate(-90 ${M.left - 40} ${M.top})">α, σ</text>`;
+  out += `<text class="axis-label" x="${W - M.right + 40}" y="${M.top}" transform="rotate(-90 ${W - M.right + 40} ${M.top})" fill="var(--accent-3)">log SNR</text>`;
+
+  const stride = 10;
+  const buildPath = (arr, scale) => {
+    const parts = [];
+    for (let t = 0; t < T; t += stride) {
+      parts.push(`${t===0?"M":"L"}${sx(t).toFixed(1)},${scale(arr[t]).toFixed(1)}`);
+    }
+    parts.push(`L${sx(T-1).toFixed(1)},${scale(arr[T-1]).toFixed(1)}`);
+    return parts.join(" ");
+  };
+
+  out += `<path class="curve" d="${buildPath(alpha, syL)}" stroke="var(--accent)" />`;
+  out += `<path class="curve" d="${buildPath(sigma, syL)}" stroke="var(--accent-2)" />`;
+  out += `<path class="curve" d="${buildPath(logSnr, syR)}" stroke="var(--accent-3)" />`;
+
+  /* Series labels at the right */
+  const labelY = t => sx(t);
+  out += `<text class="series-lbl" fill="var(--accent)" x="${W - M.right + 10}" y="${syL(alpha[T-1]) + 4}">α(t)</text>`;
+  out += `<text class="series-lbl" fill="var(--accent-2)" x="${W - M.right + 10}" y="${syL(sigma[T-1]) + 4}">σ(t)</text>`;
+  out += `<text class="series-lbl" fill="var(--accent-3)" x="${W - M.right + 10}" y="${syR(logSnr[T-1]) + 4}">log SNR</text>`;
+
+  /* Invisible hover strip */
+  out += `<rect id="schedule-hitzone" x="${M.left}" y="${M.top}" width="${W - M.left - M.right}" height="${H - M.top - M.bottom}" fill="transparent" pointer-events="all" />`;
+
+  svg.innerHTML = out;
+
+  /* Hover: vertical guide + value readout */
+  const tt = document.getElementById("schedule-tooltip");
+  const wrap = svg.parentElement;
+  const hit = svg.querySelector("#schedule-hitzone");
+  const guide = document.createElementNS("http://www.w3.org/2000/svg", "line");
+  guide.setAttribute("stroke", "var(--ink-mute)");
+  guide.setAttribute("stroke-width", "1");
+  guide.setAttribute("stroke-dasharray", "2 3");
+  guide.setAttribute("style", "pointer-events:none;opacity:0;");
+  svg.appendChild(guide);
+  const dotA = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+  const dotS = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+  const dotL = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+  [ [dotA, "var(--accent)"], [dotS, "var(--accent-2)"], [dotL, "var(--accent-3)"] ].forEach(([c, col]) => {
+    c.setAttribute("r", "4");
+    c.setAttribute("fill", "var(--paper)");
+    c.setAttribute("stroke", col);
+    c.setAttribute("stroke-width", "1.8");
+    c.setAttribute("style", "pointer-events:none;opacity:0;");
+    svg.appendChild(c);
+  });
+
+  hit.addEventListener("mousemove", (e) => {
+    const svgRect = svg.getBoundingClientRect();
+    const scale = svgRect.width / W;
+    const localX = (e.clientX - svgRect.left) / scale;
+    const t = Math.max(0, Math.min(T - 1, Math.round((localX - M.left) / (W - M.left - M.right) * (T - 1))));
+    const x = sx(t);
+    guide.setAttribute("x1", x); guide.setAttribute("x2", x);
+    guide.setAttribute("y1", M.top); guide.setAttribute("y2", H - M.bottom);
+    guide.style.opacity = 1;
+    dotA.setAttribute("cx", x); dotA.setAttribute("cy", syL(alpha[t])); dotA.style.opacity = 1;
+    dotS.setAttribute("cx", x); dotS.setAttribute("cy", syL(sigma[t])); dotS.style.opacity = 1;
+    dotL.setAttribute("cx", x); dotL.setAttribute("cy", syR(logSnr[t])); dotL.style.opacity = 1;
+    tt.innerHTML = `<strong>t = ${t}</strong><br>α = ${alpha[t].toFixed(3)}<br>σ = ${sigma[t].toFixed(3)}<br>log SNR = ${logSnr[t].toFixed(2)}`;
+    positionTooltip(tt, wrap, svg, x, syL(alpha[t]));
+    tt.style.opacity = 1;
+  });
+  hit.addEventListener("mouseleave", () => {
+    tt.style.opacity = 0;
+    guide.style.opacity = 0;
+    dotA.style.opacity = 0; dotS.style.opacity = 0; dotL.style.opacity = 0;
+  });
+}
+
+/* =============================================================
+   CFG image-swap slider
+   ============================================================= */
+function setCfg(idx) {
+  const v = CFG_VALUES[idx];
+  document.getElementById("cfg-img").src = `panels/panel_06_cfg_${v}.png`;
+  document.getElementById("cfg-value").textContent = v;
+}
+
+/* =============================================================
+   Slerp slider
+   ============================================================= */
+function setSlerpCol(idx) {
+  document.getElementById("slerp-viewer").style.setProperty("--col-idx", idx);
+  document.getElementById("slerp-value").textContent = (idx / 7).toFixed(2);
+}
+
+/* =============================================================
+   Lightbox
+   ============================================================= */
+function openLightbox(src, alt) {
+  const box = document.getElementById("lightbox");
+  const img = document.getElementById("lightbox-img");
+  img.src = src;
+  img.alt = alt || "";
+  box.classList.add("open");
+  document.body.style.overflow = "hidden";
+}
+function closeLightbox(e) {
+  if (e && e.target && e.target.tagName === "IMG" && e.target.id === "lightbox-img") return;
+  document.getElementById("lightbox").classList.remove("open");
+  document.body.style.overflow = "";
+}
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeLightbox(); });
+
+function wireLightbox() {
+  document.querySelectorAll("main img.plain-img, .bleed-fig img, .table-fig .table-img img, .cfg-viewer img")
+    .forEach(img => img.addEventListener("click", () => openLightbox(img.src, img.alt)));
+}
+
+/* =============================================================
+   Scroll reveal
+   ============================================================= */
+function wireReveal() {
+  const io = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); }
+    });
+  }, { threshold: 0.08, rootMargin: "0px 0px -80px 0px" });
+  document.querySelectorAll(".reveal").forEach(el => io.observe(el));
+}
+
+/* =============================================================
+   Hero parallax
+   ============================================================= */
+function wireParallax() {
+  const bg = document.querySelector(".hero-bg");
+  if (!bg) return;
+  window.addEventListener("scroll", () => {
+    bg.style.setProperty("--parallax", (window.scrollY * 0.35) + "px");
+  }, { passive: true });
+}
+
+/* =============================================================
+   Init
+   ============================================================= */
+window.addEventListener("DOMContentLoaded", () => {
+  buildFidChart();
+  buildConvergenceChart();
+  buildSamplerChart();
+  buildScheduleChart();
+  wireLightbox();
+  wireReveal();
+  wireParallax();
+});
+</script>
+
+</body>
+</html>

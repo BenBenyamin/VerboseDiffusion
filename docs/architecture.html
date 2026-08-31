@@ -1,0 +1,2079 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Architecture — VerboseDiffusion</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Newsreader:ital,opsz,wght@0,6..72,300..700;1,6..72,300..700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+<style>
+/* ============================================================
+   Tokens (mirror index.html)
+   ============================================================ */
+:root {
+  --paper:      #faf7f2;
+  --paper-alt:  #f2ede4;
+  --paper-warm: #ede5d4;
+  --ink:        #1a1817;
+  --ink-soft:   #46423d;
+  --ink-mute:   #7a7368;
+  --rule:       #cfc7b7;
+  --rule-soft:  #e4ddce;
+  --accent:     #a64d1f;
+  --accent-soft:#dc9b7d;
+  --accent-2:   #4a6d4a;
+  --accent-3:   #6a5a89;
+
+  --f-display:  "Instrument Serif", "Newsreader", ui-serif, Georgia, serif;
+  --f-body:     "Newsreader", ui-serif, Georgia, serif;
+  --f-mono:     "IBM Plex Mono", "Menlo", "DejaVu Sans Mono", "Consolas",
+                "Liberation Mono", ui-monospace, "SF Mono", monospace;
+
+  --side:       max(20px, 6vw);
+  --sidebar-w:  260px;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+html, body { margin: 0; padding: 0; background: var(--paper); color: var(--ink); }
+body {
+  font-family: var(--f-body);
+  font-size: 18px;
+  line-height: 1.62;
+  font-weight: 380;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* ============================================================
+   Layout — sidebar left, main center, drawer right
+   ============================================================ */
+.layout {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) 1fr;
+  min-height: 100vh;
+}
+
+/* ============================================================
+   Sidebar
+   ============================================================ */
+.sidebar {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+  border-right: 1px solid var(--rule-soft);
+  padding: 32px 28px 24px;
+  background: var(--paper);
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.side-brand {
+  font-family: var(--f-display);
+  font-size: 22px;
+  line-height: 1;
+  color: var(--ink);
+  text-decoration: none;
+  letter-spacing: -0.01em;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--rule-soft);
+}
+.side-brand small {
+  display: block;
+  font-family: var(--f-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  margin-top: 6px;
+}
+.side-sections { display: flex; flex-direction: column; gap: 2px; }
+.side-sections .side-lbl {
+  font-family: var(--f-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  padding: 0 0 4px 8px;
+  margin-top: 12px;
+}
+.side-sections a {
+  font-family: var(--f-body);
+  font-size: 15px;
+  color: var(--ink-soft);
+  text-decoration: none;
+  padding: 6px 8px;
+  border-radius: 3px;
+  border-left: 2px solid transparent;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.side-sections a .num {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  color: var(--ink-mute);
+  margin-right: 8px;
+  letter-spacing: 0.04em;
+}
+.side-sections a:hover { background: var(--paper-alt); color: var(--ink); }
+.side-sections a.active {
+  background: var(--paper-alt);
+  border-left-color: var(--accent);
+  color: var(--ink);
+}
+.side-links {
+  margin-top: auto;
+  padding-top: 20px;
+  border-top: 1px solid var(--rule-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.side-links a {
+  font-family: var(--f-mono);
+  font-size: 12px;
+  color: var(--accent);
+  text-decoration: none;
+  letter-spacing: 0.04em;
+}
+.side-links a:hover { text-decoration: underline; }
+
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; }
+  .sidebar {
+    position: relative;
+    height: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--rule-soft);
+  }
+}
+
+/* ============================================================
+   Content column
+   ============================================================ */
+.content {
+  min-width: 0;
+  padding: 0 var(--side) 96px;
+  max-width: 1100px;
+}
+
+/* ============================================================
+   Type
+   ============================================================ */
+h1, h2, h3 { margin: 0; font-family: var(--f-display); font-weight: 400; letter-spacing: -0.008em; }
+h1 { font-size: clamp(56px, 8vw, 96px); line-height: 0.98; }
+h2 { font-size: clamp(30px, 3.8vw, 42px); line-height: 1.08; margin-top: 80px; margin-bottom: 18px; padding-left: 12px; border-left: 3px solid var(--accent); }
+h3 { font-size: 22px; line-height: 1.2; margin-top: 28px; margin-bottom: 8px; }
+p { margin: 0 0 1em; }
+em { font-style: italic; }
+strong { font-weight: 600; }
+code {
+  font-family: var(--f-mono);
+  font-size: 0.86em;
+  background: var(--paper-alt);
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: var(--ink);
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+
+.section-mark {
+  display: block;
+  font-family: var(--f-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-top: 80px;
+  padding-left: 15px;
+}
+.section-mark:first-of-type { margin-top: 40px; }
+
+.prose { max-width: 68ch; }
+.prose p { max-width: 68ch; }
+
+pre {
+  font-family: var(--f-mono);
+  font-size: 13px;
+  line-height: 1.55;
+  background: var(--paper-alt);
+  border-radius: 4px;
+  padding: 14px 16px;
+  overflow-x: auto;
+  margin: 20px 0;
+  max-width: 68ch;
+}
+pre .cm { color: var(--ink-mute); }        /* comments */
+pre .kw { color: var(--accent-3); }        /* keywords */
+pre .fn { color: var(--accent); }          /* function names */
+pre .st { color: var(--accent-2); }        /* strings */
+
+/* ============================================================
+   Hero
+   ============================================================ */
+.hero {
+  padding: 48px 0 20px;
+  border-bottom: 1px solid var(--rule-soft);
+  margin-bottom: 20px;
+}
+.hero-tag {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  color: var(--ink-mute);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  margin-bottom: 24px;
+}
+.hero-title {
+  font-family: var(--f-display);
+  font-size: clamp(56px, 9vw, 108px);
+  line-height: 0.94;
+  letter-spacing: -0.02em;
+  margin: 0 0 12px;
+}
+.hero-subtitle {
+  font-family: var(--f-display);
+  font-size: clamp(22px, 2.4vw, 30px);
+  line-height: 1.2;
+  color: var(--ink-soft);
+  margin: 0 0 22px;
+  max-width: 34ch;
+}
+.hero-subtitle em { color: var(--accent); }
+.hero-byline {
+  font-family: var(--f-mono);
+  font-size: 13px;
+  color: var(--ink-mute);
+  letter-spacing: 0.04em;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 0;
+}
+.hero-byline .author-name {
+  font-family: var(--f-display);
+  font-size: clamp(22px, 2.6vw, 30px);
+  font-style: italic;
+  color: var(--ink);
+  letter-spacing: -0.005em;
+  line-height: 1;
+}
+.hero-byline .divider { color: var(--ink-mute); font-size: 16px; }
+.hero-byline a { color: var(--accent); }
+
+/* ============================================================
+   Interactive canvas
+   ============================================================ */
+.canvas-section {
+  margin: 28px 0 40px;
+  background: var(--paper-alt);
+  border-radius: 8px;
+  padding: 18px 22px 24px;
+}
+.canvas-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 16px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+.breadcrumb {
+  font-family: var(--f-mono);
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.breadcrumb .crumb {
+  cursor: pointer;
+  padding: 3px 8px;
+  border-radius: 3px;
+  transition: background 0.15s;
+  color: var(--ink-soft);
+}
+.breadcrumb .crumb:hover { background: var(--paper-warm); }
+.breadcrumb .crumb.current { color: var(--accent); font-weight: 500; cursor: default; }
+.breadcrumb .crumb.current:hover { background: none; }
+.breadcrumb .sep { color: var(--ink-mute); }
+.canvas-hint {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  color: var(--ink-mute);
+  letter-spacing: 0.04em;
+}
+.canvas-hint kbd {
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-family: var(--f-mono);
+  font-size: 10.5px;
+  margin: 0 2px;
+}
+.canvas {
+  position: relative;
+  background: var(--paper);
+  border-radius: 6px;
+  overflow: hidden;
+  min-height: 460px;
+  border: 1px solid var(--rule-soft);
+}
+.view {
+  position: absolute;
+  inset: 0;
+  padding: 24px;
+  opacity: 0;
+  transform: scale(0.94);
+  transition: opacity 0.32s ease, transform 0.42s cubic-bezier(0.2, 0.7, 0.2, 1);
+  pointer-events: none;
+}
+.view.active {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+.view.enter-from-parent { transform: scale(0.85); }
+.view.enter-from-child  { transform: scale(1.08); }
+
+.view svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-height: 500px;
+  font-family: var(--f-mono);
+}
+.view svg .node {
+  cursor: pointer;
+  transition: transform 0.15s, filter 0.15s;
+  transform-origin: center;
+  transform-box: fill-box;
+}
+.view svg .node:hover { filter: brightness(1.03); }
+.view svg .node.composite rect,
+.view svg .node.composite .box {
+  fill: var(--paper);
+  stroke: var(--accent);
+  stroke-width: 1.4;
+  rx: 4;
+}
+.view svg .node.composite:hover rect,
+.view svg .node.composite:hover .box {
+  fill: var(--paper-warm);
+  stroke: var(--accent);
+}
+.view svg .node.leaf rect,
+.view svg .node.leaf .box {
+  fill: var(--paper-alt);
+  stroke: var(--ink-mute);
+  stroke-width: 1;
+  rx: 3;
+}
+.view svg .node.leaf:hover rect,
+.view svg .node.leaf:hover .box {
+  fill: var(--paper-warm);
+  stroke: var(--accent);
+}
+.view svg .node .lbl {
+  fill: var(--ink);
+  font-size: 13px;
+  font-family: var(--f-body);
+  text-anchor: middle;
+  pointer-events: none;
+}
+.view svg .node .sub {
+  fill: var(--ink-mute);
+  font-size: 10.5px;
+  font-family: var(--f-mono);
+  text-anchor: middle;
+  pointer-events: none;
+  letter-spacing: 0.02em;
+}
+.view svg .arrow { stroke: var(--ink-soft); stroke-width: 1.5; fill: none; marker-end: url(#arrowhead); }
+.view svg .skip { stroke: var(--accent-2); stroke-width: 1.4; stroke-dasharray: 4 4; fill: none; }
+.view svg .skip.match-hover { stroke: var(--accent); stroke-width: 2.4; stroke-dasharray: none; }
+.view svg .node.skip-match rect,
+.view svg .node.skip-match .box {
+  stroke: var(--accent);
+  stroke-width: 2.4;
+}
+.view svg .flow-label {
+  fill: var(--ink-mute);
+  font-family: var(--f-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  pointer-events: none;
+}
+.view svg .group-label {
+  fill: var(--accent);
+  font-family: var(--f-body);
+  font-style: italic;
+  font-size: 13px;
+  font-weight: 500;
+  pointer-events: none;
+}
+
+/* ============================================================
+   Info drawer (right)
+   ============================================================ */
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(440px, 92vw);
+  background: var(--paper);
+  border-left: 1px solid var(--rule);
+  box-shadow: -8px 0 32px rgba(0,0,0,0.06);
+  transform: translateX(100%);
+  transition: transform 0.35s cubic-bezier(0.2, 0.7, 0.2, 1);
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+}
+.drawer.open { transform: none; }
+.drawer-head {
+  padding: 24px 26px 16px;
+  border-bottom: 1px solid var(--rule-soft);
+}
+.drawer-eyebrow {
+  font-family: var(--f-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0 0 6px;
+}
+.drawer-title {
+  font-family: var(--f-display);
+  font-size: 30px;
+  line-height: 1.1;
+  margin: 0 0 6px;
+  color: var(--ink);
+}
+.drawer-subtitle {
+  font-family: var(--f-mono);
+  font-size: 12px;
+  color: var(--ink-mute);
+  letter-spacing: 0.03em;
+  margin: 0;
+}
+.drawer-body {
+  padding: 20px 26px 40px;
+  overflow-y: auto;
+  flex: 1;
+}
+.drawer-body p { font-size: 15px; line-height: 1.6; color: var(--ink); margin: 0 0 14px; }
+.drawer-body h4 {
+  font-family: var(--f-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  margin: 20px 0 8px;
+  font-weight: 500;
+}
+.drawer-body .params {
+  font-family: var(--f-mono);
+  font-size: 13px;
+  line-height: 1.55;
+  background: var(--paper-alt);
+  border-radius: 4px;
+  padding: 10px 14px;
+  color: var(--ink);
+}
+.drawer-body .params .k { color: var(--accent-3); }
+.drawer-body .params .v { color: var(--ink); }
+.drawer-body pre {
+  font-size: 12.5px;
+  max-width: none;
+  margin: 0;
+}
+.drawer-body .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.drawer-body .chip {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 3px;
+  background: var(--paper-alt);
+  color: var(--ink-soft);
+  border: 1px solid var(--rule-soft);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.drawer-body .chip:hover {
+  background: var(--paper-warm);
+  border-color: var(--accent);
+  color: var(--ink);
+}
+.drawer-close {
+  position: absolute;
+  top: 18px;
+  right: 22px;
+  background: transparent;
+  border: 1px solid var(--rule);
+  color: var(--ink-soft);
+  border-radius: 3px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-family: var(--f-mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.drawer-close:hover { background: var(--paper-alt); color: var(--ink); }
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 18, 15, 0.28);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.3s, visibility 0.3s;
+  z-index: 55;
+}
+.drawer-backdrop.open { opacity: 1; visibility: visible; }
+
+/* ============================================================
+   Config table
+   ============================================================ */
+.config-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 20px 0;
+  font-family: var(--f-mono);
+  font-size: 13px;
+}
+.config-table th, .config-table td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--rule-soft);
+  vertical-align: top;
+}
+.config-table th {
+  color: var(--ink-mute);
+  font-weight: 500;
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.config-table td.k { color: var(--accent); }
+.config-table td.v { color: var(--ink); }
+.config-table td.note { font-family: var(--f-body); color: var(--ink-soft); font-size: 14.5px; }
+
+/* ============================================================
+   Coda + footer
+   ============================================================ */
+.coda {
+  margin: 80px 0 20px;
+  padding: 32px;
+  background: var(--paper-alt);
+  border-radius: 4px;
+  border-left: 3px solid var(--accent);
+  max-width: 68ch;
+}
+.coda h3 { font-size: 22px; margin: 0 0 10px; }
+.coda p { font-size: 15.5px; margin: 0 0 12px; }
+footer {
+  margin-top: 40px;
+  padding-top: 24px;
+  border-top: 1px solid var(--rule-soft);
+  color: var(--ink-mute);
+  font-family: var(--f-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  text-align: center;
+}
+footer a { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<div class="layout">
+
+<!-- ============ SIDEBAR ============ -->
+<nav class="sidebar" aria-label="Sections">
+  <a href="#top" class="side-brand">
+    VerboseDiffusion
+    <small>architecture</small>
+  </a>
+
+  <div class="side-sections">
+    <span class="side-lbl">Interactive</span>
+    <a href="#canvas" data-nav="canvas"><span class="num">◈</span>Zoom canvas</a>
+
+    <span class="side-lbl">Sections</span>
+    <a href="#overview" data-nav="overview"><span class="num">01</span>Overview</a>
+    <a href="#pipeline" data-nav="pipeline"><span class="num">02</span>Pipeline</a>
+    <a href="#unet" data-nav="unet"><span class="num">03</span>UNet</a>
+    <a href="#blocks" data-nav="blocks"><span class="num">04</span>Blocks</a>
+    <a href="#math" data-nav="math"><span class="num">05</span>Math</a>
+    <a href="#training" data-nav="training"><span class="num">06</span>Training</a>
+    <a href="#sampling" data-nav="sampling"><span class="num">07</span>Sampling</a>
+    <a href="#config" data-nav="config"><span class="num">08</span>Config</a>
+    <a href="#refs" data-nav="refs"><span class="num">09</span>References</a>
+  </div>
+
+  <div class="side-links">
+    <a href="index.html">← Back to gallery</a>
+    <a href="https://github.com/BenBenyamin/VerboseDiffusion" target="_blank" rel="noopener">GitHub ↗</a>
+  </div>
+</nav>
+
+<!-- ============ CONTENT ============ -->
+<main class="content" id="top">
+
+<!-- ============ HERO ============ -->
+<header class="hero">
+  <div class="hero-tag">§ ARCHITECTURE &nbsp;·&nbsp; VerboseDiffusion internals</div>
+  <h1 class="hero-title">Architecture.</h1>
+  <p class="hero-subtitle">Under the hood of the diffusion model &mdash;
+    <em>zoom in as far as PyTorch modules go.</em></p>
+  <p class="hero-byline">
+    by <span class="author-name">Ben Benyamin</span>
+    <span class="divider">·</span>
+    source on <a href="https://github.com/BenBenyamin/VerboseDiffusion" target="_blank" rel="noopener">GitHub ↗</a>
+  </p>
+</header>
+
+<!-- ============ CANVAS ============ -->
+<section id="canvas" class="canvas-section" aria-label="Interactive architecture">
+  <div class="canvas-header">
+    <div class="breadcrumb" id="breadcrumb"></div>
+    <div class="canvas-hint">
+      click a block to zoom &nbsp;·&nbsp; <kbd>Esc</kbd> to zoom out &nbsp;·&nbsp; click a leaf for details
+    </div>
+  </div>
+  <div class="canvas" id="canvas">
+    <!-- Shared defs -->
+    <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+      <defs>
+        <marker id="arrowhead" markerWidth="8" markerHeight="8" refX="6" refY="4"
+                orient="auto" markerUnits="strokeWidth">
+          <path d="M0,0 L6,4 L0,8 z" fill="#46423d" />
+        </marker>
+      </defs>
+    </svg>
+
+    <!-- =========== VIEW: pipeline =========== -->
+    <div class="view" data-view="pipeline">
+      <svg viewBox="0 0 900 420">
+        <text class="group-label" x="30" y="30">The pipeline</text>
+        <text class="flow-label" x="30" y="50">real image → VAE encode → latent → forward noise → UNet denoise → VAE decode</text>
+
+        <!-- Real image -->
+        <g class="node leaf" data-node="real_image" transform="translate(30, 90)">
+          <rect width="130" height="60" />
+          <text class="lbl" x="65" y="30">real image</text>
+          <text class="sub" x="65" y="46">3 × 512²</text>
+        </g>
+
+        <!-- VAE encoder -->
+        <g class="node leaf" data-node="vae_encoder" transform="translate(180, 90)">
+          <rect width="130" height="60" />
+          <text class="lbl" x="65" y="30">VAE encoder</text>
+          <text class="sub" x="65" y="46">sd-vae-ft-mse</text>
+        </g>
+
+        <!-- Latent -->
+        <g class="node leaf" data-node="latent" transform="translate(330, 90)">
+          <rect width="130" height="60" />
+          <text class="lbl" x="65" y="30">latent x₀</text>
+          <text class="sub" x="65" y="46">4 × 64²</text>
+        </g>
+
+        <!-- Forward noise -->
+        <g class="node leaf" data-node="forward_noise" transform="translate(330, 190)">
+          <rect width="130" height="60" />
+          <text class="lbl" x="65" y="30">+ noise ε</text>
+          <text class="sub" x="65" y="46">at random t</text>
+        </g>
+
+        <!-- Noise schedule -->
+        <g class="node leaf" data-node="noise_schedule" transform="translate(180, 190)">
+          <rect width="130" height="60" />
+          <text class="lbl" x="65" y="30">noise schedule</text>
+          <text class="sub" x="65" y="46">cosine, T = 1000</text>
+        </g>
+
+        <!-- UNet -->
+        <g class="node composite" data-node="unet" transform="translate(510, 140)">
+          <rect width="170" height="120" />
+          <text class="lbl" x="85" y="50">UNet</text>
+          <text class="sub" x="85" y="70">εθ(xₜ, t, c)</text>
+          <text class="sub" x="85" y="88" fill="var(--accent)">↳ click to zoom in</text>
+        </g>
+
+        <!-- Sampler loop -->
+        <g class="node composite" data-node="sampler_loop" transform="translate(700, 140)">
+          <rect width="150" height="120" />
+          <text class="lbl" x="75" y="50">sampler loop</text>
+          <text class="sub" x="75" y="70">DDIM / DPM++</text>
+          <text class="sub" x="75" y="88" fill="var(--accent)">↳ click for details</text>
+        </g>
+
+        <!-- VAE decoder -->
+        <g class="node leaf" data-node="vae_decoder" transform="translate(340, 320)">
+          <rect width="140" height="60" />
+          <text class="lbl" x="70" y="30">VAE decoder</text>
+          <text class="sub" x="70" y="46">sd-vae-ft-mse</text>
+        </g>
+
+        <!-- Sample -->
+        <g class="node leaf" data-node="sample_output" transform="translate(200, 320)">
+          <rect width="120" height="60" />
+          <text class="lbl" x="60" y="30">sample</text>
+          <text class="sub" x="60" y="46">3 × 512²</text>
+        </g>
+
+        <!-- Class label -->
+        <g class="node leaf" data-node="class_input" transform="translate(510, 40)">
+          <rect width="170" height="52" />
+          <text class="lbl" x="85" y="24">class label c</text>
+          <text class="sub" x="85" y="40">{cat, dog, wild}</text>
+        </g>
+
+        <!-- Timestep t -->
+        <g class="node leaf" data-node="timestep_input" transform="translate(700, 40)">
+          <rect width="150" height="52" />
+          <text class="lbl" x="75" y="24">timestep t</text>
+          <text class="sub" x="75" y="40">∈ {0..T−1}</text>
+        </g>
+
+        <!-- Arrows -->
+        <line class="arrow" x1="160" y1="120" x2="180" y2="120" />
+        <line class="arrow" x1="310" y1="120" x2="330" y2="120" />
+        <line class="arrow" x1="460" y1="140" x2="510" y2="180" />
+        <line class="arrow" x1="310" y1="220" x2="330" y2="220" />
+        <line class="arrow" x1="460" y1="220" x2="510" y2="200" />
+        <line class="arrow" x1="595" y1="92" x2="595" y2="140" />
+        <line class="arrow" x1="775" y1="92" x2="775" y2="140" />
+        <line class="arrow" x1="680" y1="200" x2="700" y2="200" />
+        <line class="arrow" x1="700" y1="260" x2="480" y2="340" />
+        <line class="arrow" x1="340" y1="350" x2="320" y2="350" />
+      </svg>
+    </div>
+
+    <!-- =========== VIEW: unet =========== -->
+    <div class="view" data-view="unet">
+      <svg viewBox="0 0 940 500">
+        <text class="group-label" x="30" y="30">UNet</text>
+        <text class="flow-label" x="30" y="50">4-level encoder-decoder, attention at the two deeper resolutions and mid</text>
+
+        <!-- Time+class embedding rail -->
+        <g class="node composite" data-node="noise_pipeline" transform="translate(30, 90)">
+          <rect width="180" height="52" />
+          <text class="lbl" x="90" y="24">noise_pipeline</text>
+          <text class="sub" x="90" y="40">time embedding</text>
+        </g>
+        <g class="node leaf" data-node="class_embd" transform="translate(30, 160)">
+          <rect width="180" height="52" />
+          <text class="lbl" x="90" y="24">class_embd</text>
+          <text class="sub" x="90" y="40">nn.Embedding(4, 256)</text>
+        </g>
+        <text class="flow-label" x="45" y="230">+ &nbsp;→ &nbsp; temb (added into ResBlocks)</text>
+
+        <!-- Input conv -->
+        <g class="node leaf" data-node="input_conv" transform="translate(240, 250)">
+          <rect width="90" height="60" />
+          <text class="lbl" x="45" y="30">input_conv</text>
+          <text class="sub" x="45" y="46">4 → 128</text>
+        </g>
+
+        <!-- Down 0 -->
+        <g class="node composite" data-node="down_block_0" transform="translate(240, 340)" data-skip-match="up_block_2">
+          <rect width="90" height="80" />
+          <text class="lbl" x="45" y="30">DownBlock 0</text>
+          <text class="sub" x="45" y="48">128 → 256</text>
+          <text class="sub" x="45" y="62">64² → 32²</text>
+        </g>
+
+        <!-- Down 1 -->
+        <g class="node composite" data-node="down_block_1" transform="translate(340, 340)" data-skip-match="up_block_1">
+          <rect width="90" height="80" />
+          <text class="lbl" x="45" y="30">DownBlock 1</text>
+          <text class="sub" x="45" y="48">256 → 384</text>
+          <text class="sub" x="45" y="62">32² → 16²</text>
+        </g>
+
+        <!-- Down 2 -->
+        <g class="node composite" data-node="down_block_2" transform="translate(440, 340)" data-skip-match="up_block_0">
+          <rect width="90" height="80" />
+          <text class="lbl" x="45" y="30">DownBlock 2</text>
+          <text class="sub" x="45" y="48">384 → 512</text>
+          <text class="sub" x="45" y="62">16² → 8²</text>
+        </g>
+
+        <!-- Mid -->
+        <g class="node composite" data-node="mid_block" transform="translate(560, 340)">
+          <rect width="100" height="80" />
+          <text class="lbl" x="50" y="30">MidBlock</text>
+          <text class="sub" x="50" y="48">512, 8²</text>
+          <text class="sub" x="50" y="62">res⇄attn</text>
+        </g>
+
+        <!-- Up 2 -->
+        <g class="node composite" data-node="up_block_0" transform="translate(690, 340)" data-skip-match="down_block_2">
+          <rect width="90" height="80" />
+          <text class="lbl" x="45" y="30">UpBlock 2</text>
+          <text class="sub" x="45" y="48">512 → 384</text>
+          <text class="sub" x="45" y="62">8² → 16²</text>
+        </g>
+
+        <!-- Up 1 -->
+        <g class="node composite" data-node="up_block_1" transform="translate(790, 340)" data-skip-match="down_block_1">
+          <rect width="90" height="80" />
+          <text class="lbl" x="45" y="30">UpBlock 1</text>
+          <text class="sub" x="45" y="48">384 → 256</text>
+          <text class="sub" x="45" y="62">16² → 32²</text>
+        </g>
+
+        <!-- Up 0 -->
+        <g class="node composite" data-node="up_block_2" transform="translate(790, 250)" data-skip-match="down_block_0">
+          <rect width="90" height="60" />
+          <text class="lbl" x="45" y="30">UpBlock 0</text>
+          <text class="sub" x="45" y="46">256 → 128</text>
+        </g>
+
+        <!-- Out head -->
+        <g class="node composite" data-node="out_head" transform="translate(790, 160)">
+          <rect width="90" height="70" />
+          <text class="lbl" x="45" y="30">out_head</text>
+          <text class="sub" x="45" y="46">128 → 4</text>
+        </g>
+
+        <!-- Arrows -->
+        <line class="arrow" x1="285" y1="310" x2="285" y2="340" />
+        <line class="arrow" x1="330" y1="380" x2="340" y2="380" />
+        <line class="arrow" x1="430" y1="380" x2="440" y2="380" />
+        <line class="arrow" x1="530" y1="380" x2="560" y2="380" />
+        <line class="arrow" x1="660" y1="380" x2="690" y2="380" />
+        <line class="arrow" x1="780" y1="380" x2="790" y2="380" />
+        <line class="arrow" x1="835" y1="340" x2="835" y2="310" />
+        <line class="arrow" x1="835" y1="250" x2="835" y2="230" />
+
+        <!-- temb rail feed -->
+        <line class="arrow" x1="120" y1="230" x2="120" y2="440" />
+        <line class="arrow" x1="120" y1="440" x2="230" y2="440" />
+
+        <!-- Skip connections (curved dashed) -->
+        <path class="skip" data-skip="skip_0_2" d="M 285 340 C 285 190, 835 190, 835 250" />
+        <path class="skip" data-skip="skip_1_1" d="M 385 340 C 385 200, 835 200, 835 340" />
+        <path class="skip" data-skip="skip_2_0" d="M 485 340 C 485 220, 735 220, 735 340" />
+
+        <text class="flow-label" x="500" y="90" text-anchor="middle" fill="var(--accent-2)">↕ skip connections (dashed)</text>
+      </svg>
+    </div>
+
+    <!-- =========== VIEW: down_block =========== -->
+    <div class="view" data-view="down_block_0 down_block_1 down_block_2">
+      <svg viewBox="0 0 900 400">
+        <text class="group-label" x="30" y="30">DownBlock</text>
+        <text class="flow-label" x="30" y="50">block_depth × ResidualBlock → optional Attention → stride-2 Conv2d (downsample)</text>
+
+        <g class="node leaf" data-node="input_x" transform="translate(30, 160)">
+          <rect width="90" height="52" />
+          <text class="lbl" x="45" y="24">x_in</text>
+          <text class="sub" x="45" y="40">skip out</text>
+        </g>
+
+        <g class="node composite" data-node="res_block" transform="translate(160, 140)">
+          <rect width="130" height="90" />
+          <text class="lbl" x="65" y="34">ResidualBlock 0</text>
+          <text class="sub" x="65" y="54">C_in → C_out</text>
+          <text class="sub" x="65" y="72" fill="var(--accent)">↳ zoom</text>
+        </g>
+
+        <g class="node composite" data-node="res_block" transform="translate(330, 140)">
+          <rect width="130" height="90" />
+          <text class="lbl" x="65" y="34">ResidualBlock 1</text>
+          <text class="sub" x="65" y="54">C_out → C_out</text>
+          <text class="sub" x="65" y="72" fill="var(--accent)">↳ zoom</text>
+        </g>
+
+        <g class="node composite" data-node="attn_block" transform="translate(500, 140)">
+          <rect width="130" height="90" />
+          <text class="lbl" x="65" y="34">AttentionBlock</text>
+          <text class="sub" x="65" y="54">optional, at deep levels</text>
+          <text class="sub" x="65" y="72" fill="var(--accent)">↳ zoom</text>
+        </g>
+
+        <g class="node leaf" data-node="downsample" transform="translate(670, 140)">
+          <rect width="130" height="90" />
+          <text class="lbl" x="65" y="34">downsample</text>
+          <text class="sub" x="65" y="54">Conv 3×3, stride 2</text>
+          <text class="sub" x="65" y="72">C_out → C_out</text>
+        </g>
+
+        <line class="arrow" x1="120" y1="186" x2="160" y2="186" />
+        <line class="arrow" x1="290" y1="186" x2="330" y2="186" />
+        <line class="arrow" x1="460" y1="186" x2="500" y2="186" />
+        <line class="arrow" x1="630" y1="186" x2="670" y2="186" />
+
+        <!-- skip harvest -->
+        <path class="skip" d="M 225 140 C 225 90, 60 60, 60 160" />
+        <text class="flow-label" x="150" y="80" fill="var(--accent-2)">skips harvested after each ResBlock (before downsample)</text>
+
+        <!-- temb path -->
+        <text class="flow-label" x="245" y="290" text-anchor="middle">↑ temb injected inside each ResBlock</text>
+      </svg>
+    </div>
+
+    <!-- =========== VIEW: up_block =========== -->
+    <div class="view" data-view="up_block_0 up_block_1 up_block_2">
+      <svg viewBox="0 0 900 420">
+        <text class="group-label" x="30" y="30">UpBlock</text>
+        <text class="flow-label" x="30" y="50">nearest upsample + 3×3 conv → concat skip → ResidualBlock → optional Attention</text>
+
+        <g class="node composite" data-node="upsample_conv" transform="translate(30, 150)">
+          <rect width="150" height="90" />
+          <text class="lbl" x="75" y="34">up_sample</text>
+          <text class="sub" x="75" y="54">Upsample(nearest)</text>
+          <text class="sub" x="75" y="70">→ Conv 3×3</text>
+        </g>
+
+        <g class="node leaf" data-node="skip_concat" transform="translate(210, 150)">
+          <rect width="110" height="90" />
+          <text class="lbl" x="55" y="34">concat skip</text>
+          <text class="sub" x="55" y="54">↕ from matching</text>
+          <text class="sub" x="55" y="70">DownBlock</text>
+        </g>
+
+        <g class="node composite" data-node="res_block" transform="translate(350, 150)">
+          <rect width="140" height="90" />
+          <text class="lbl" x="70" y="34">ResidualBlock</text>
+          <text class="sub" x="70" y="54">2C_in → C_out</text>
+          <text class="sub" x="70" y="70" fill="var(--accent)">↳ zoom</text>
+        </g>
+
+        <g class="node composite" data-node="attn_block" transform="translate(520, 150)">
+          <rect width="140" height="90" />
+          <text class="lbl" x="70" y="34">AttentionBlock</text>
+          <text class="sub" x="70" y="54">optional</text>
+          <text class="sub" x="70" y="70" fill="var(--accent)">↳ zoom</text>
+        </g>
+
+        <line class="arrow" x1="180" y1="195" x2="210" y2="195" />
+        <line class="arrow" x1="320" y1="195" x2="350" y2="195" />
+        <line class="arrow" x1="490" y1="195" x2="520" y2="195" />
+      </svg>
+    </div>
+
+    <!-- =========== VIEW: mid_block =========== -->
+    <div class="view" data-view="mid_block">
+      <svg viewBox="0 0 900 380">
+        <text class="group-label" x="30" y="30">MidBlock</text>
+        <text class="flow-label" x="30" y="50">n_res_blocks ResBlocks with attention interleaved between them — the bottleneck sandwich</text>
+
+        <g class="node composite" data-node="res_block" transform="translate(30, 140)">
+          <rect width="130" height="80" />
+          <text class="lbl" x="65" y="34">ResBlock 0</text>
+          <text class="sub" x="65" y="54">512 → 512</text>
+        </g>
+        <g class="node composite" data-node="attn_block" transform="translate(190, 140)">
+          <rect width="130" height="80" />
+          <text class="lbl" x="65" y="34">AttentionBlock</text>
+          <text class="sub" x="65" y="54">8 heads</text>
+        </g>
+        <g class="node composite" data-node="res_block" transform="translate(350, 140)">
+          <rect width="130" height="80" />
+          <text class="lbl" x="65" y="34">ResBlock 1</text>
+          <text class="sub" x="65" y="54">512 → 512</text>
+        </g>
+        <g class="node composite" data-node="attn_block" transform="translate(510, 140)">
+          <rect width="130" height="80" />
+          <text class="lbl" x="65" y="34">AttentionBlock</text>
+          <text class="sub" x="65" y="54">8 heads</text>
+        </g>
+        <g class="node composite" data-node="res_block" transform="translate(670, 140)">
+          <rect width="130" height="80" />
+          <text class="lbl" x="65" y="34">ResBlock 2</text>
+          <text class="sub" x="65" y="54">512 → 512</text>
+        </g>
+
+        <line class="arrow" x1="160" y1="180" x2="190" y2="180" />
+        <line class="arrow" x1="320" y1="180" x2="350" y2="180" />
+        <line class="arrow" x1="480" y1="180" x2="510" y2="180" />
+        <line class="arrow" x1="640" y1="180" x2="670" y2="180" />
+
+        <text class="flow-label" x="440" y="260" text-anchor="middle">res → attn → res → attn → res  (n_res_blocks = 3)</text>
+      </svg>
+    </div>
+
+    <!-- =========== VIEW: res_block =========== -->
+    <div class="view" data-view="res_block">
+      <svg viewBox="0 0 900 440">
+        <text class="group-label" x="30" y="30">ResidualBlock</text>
+        <text class="flow-label" x="30" y="50">norm → SiLU → Conv3×3 → time embedding → SiLU → Dropout → Conv3×3 → + residual</text>
+
+        <g class="node leaf" data-node="in_x" transform="translate(30, 200)">
+          <rect width="70" height="52" />
+          <text class="lbl" x="35" y="24">x</text>
+        </g>
+
+        <g class="node leaf" data-node="norm1" transform="translate(130, 200)">
+          <rect width="90" height="52" />
+          <text class="lbl" x="45" y="24">GroupNorm</text>
+          <text class="sub" x="45" y="40">n_groups=32</text>
+        </g>
+        <g class="node leaf" data-node="silu_1" transform="translate(240, 200)">
+          <rect width="70" height="52" />
+          <text class="lbl" x="35" y="24">SiLU</text>
+        </g>
+        <g class="node leaf" data-node="conv1" transform="translate(330, 200)">
+          <rect width="90" height="52" />
+          <text class="lbl" x="45" y="24">Conv 3×3</text>
+          <text class="sub" x="45" y="40">C→C'</text>
+        </g>
+        <g class="node composite" data-node="temb_pipeline_add" transform="translate(440, 200)">
+          <rect width="120" height="52" />
+          <text class="lbl" x="60" y="24">+ temb</text>
+          <text class="sub" x="60" y="40">FiLM / additive</text>
+        </g>
+        <g class="node leaf" data-node="silu_2" transform="translate(580, 200)">
+          <rect width="60" height="52" />
+          <text class="lbl" x="30" y="24">SiLU</text>
+        </g>
+        <g class="node leaf" data-node="dropout" transform="translate(660, 200)">
+          <rect width="80" height="52" />
+          <text class="lbl" x="40" y="24">Dropout</text>
+          <text class="sub" x="40" y="40">p=0.1</text>
+        </g>
+        <g class="node leaf" data-node="conv2" transform="translate(760, 200)">
+          <rect width="90" height="52" />
+          <text class="lbl" x="45" y="24">Conv 3×3</text>
+          <text class="sub" x="45" y="40">C'→C'</text>
+        </g>
+
+        <!-- + sum -->
+        <g class="node leaf" data-node="residual_add" transform="translate(760, 320)">
+          <rect width="90" height="52" />
+          <text class="lbl" x="45" y="24">+</text>
+          <text class="sub" x="45" y="40">residual add</text>
+        </g>
+
+        <!-- shortcut -->
+        <g class="node leaf" data-node="res_shortcut" transform="translate(30, 320)">
+          <rect width="140" height="52" />
+          <text class="lbl" x="70" y="24">shortcut</text>
+          <text class="sub" x="70" y="40">Identity or 1×1 Conv</text>
+        </g>
+
+        <!-- temb from above -->
+        <text class="flow-label" x="500" y="140" text-anchor="middle">↓ temb (from time+class embedding rail)</text>
+        <line class="arrow" x1="500" y1="150" x2="500" y2="200" />
+
+        <!-- arrows -->
+        <line class="arrow" x1="100" y1="226" x2="130" y2="226" />
+        <line class="arrow" x1="220" y1="226" x2="240" y2="226" />
+        <line class="arrow" x1="310" y1="226" x2="330" y2="226" />
+        <line class="arrow" x1="420" y1="226" x2="440" y2="226" />
+        <line class="arrow" x1="560" y1="226" x2="580" y2="226" />
+        <line class="arrow" x1="640" y1="226" x2="660" y2="226" />
+        <line class="arrow" x1="740" y1="226" x2="760" y2="226" />
+        <line class="arrow" x1="805" y1="252" x2="805" y2="320" />
+
+        <!-- residual path -->
+        <path class="skip" d="M 65 252 L 65 346 L 760 346" />
+        <line class="arrow" x1="170" y1="346" x2="760" y2="346" />
+      </svg>
+    </div>
+
+    <!-- =========== VIEW: attn_block =========== -->
+    <div class="view" data-view="attn_block">
+      <svg viewBox="0 0 900 400">
+        <text class="group-label" x="30" y="30">AttentionBlock</text>
+        <text class="flow-label" x="30" y="50">GroupNorm → flatten HW to sequence → MultiheadAttention → Linear → unflatten → + residual</text>
+
+        <g class="node leaf" data-node="in_x" transform="translate(30, 170)">
+          <rect width="70" height="52" />
+          <text class="lbl" x="35" y="24">x</text>
+          <text class="sub" x="35" y="40">B,C,H,W</text>
+        </g>
+        <g class="node leaf" data-node="attn_norm" transform="translate(130, 170)">
+          <rect width="100" height="52" />
+          <text class="lbl" x="50" y="24">GroupNorm</text>
+        </g>
+        <g class="node leaf" data-node="attn_flatten" transform="translate(250, 170)">
+          <rect width="110" height="52" />
+          <text class="lbl" x="55" y="24">flatten HW</text>
+          <text class="sub" x="55" y="40">B,C,HW → B,HW,C</text>
+        </g>
+        <g class="node leaf" data-node="mha" transform="translate(380, 170)">
+          <rect width="150" height="52" />
+          <text class="lbl" x="75" y="24">MultiheadAttention</text>
+          <text class="sub" x="75" y="40">n_heads=8</text>
+        </g>
+        <g class="node leaf" data-node="attn_linear" transform="translate(550, 170)">
+          <rect width="90" height="52" />
+          <text class="lbl" x="45" y="24">Linear</text>
+          <text class="sub" x="45" y="40">C → C</text>
+        </g>
+        <g class="node leaf" data-node="attn_unflatten" transform="translate(660, 170)">
+          <rect width="120" height="52" />
+          <text class="lbl" x="60" y="24">unflatten</text>
+          <text class="sub" x="60" y="40">B,HW,C → B,C,H,W</text>
+        </g>
+        <g class="node leaf" data-node="attn_residual_add" transform="translate(660, 290)">
+          <rect width="120" height="52" />
+          <text class="lbl" x="60" y="24">+ residual</text>
+          <text class="sub" x="60" y="40">essential — see notes</text>
+        </g>
+
+        <line class="arrow" x1="100" y1="196" x2="130" y2="196" />
+        <line class="arrow" x1="230" y1="196" x2="250" y2="196" />
+        <line class="arrow" x1="360" y1="196" x2="380" y2="196" />
+        <line class="arrow" x1="530" y1="196" x2="550" y2="196" />
+        <line class="arrow" x1="640" y1="196" x2="660" y2="196" />
+        <line class="arrow" x1="720" y1="222" x2="720" y2="290" />
+
+        <path class="skip" d="M 65 222 L 65 316 L 660 316" />
+        <line class="arrow" x1="170" y1="316" x2="660" y2="316" />
+      </svg>
+    </div>
+
+    <!-- =========== VIEW: noise_pipeline =========== -->
+    <div class="view" data-view="noise_pipeline">
+      <svg viewBox="0 0 900 300">
+        <text class="group-label" x="30" y="30">noise_pipeline (time embedding)</text>
+        <text class="flow-label" x="30" y="50">sinusoidal encode → MLP → SiLU → MLP → temb</text>
+
+        <g class="node leaf" data-node="in_t" transform="translate(30, 130)">
+          <rect width="80" height="52" />
+          <text class="lbl" x="40" y="24">t</text>
+          <text class="sub" x="40" y="40">int, ∈{0..T−1}</text>
+        </g>
+        <g class="node composite" data-node="sinusoidal_embed" transform="translate(140, 130)">
+          <rect width="170" height="52" />
+          <text class="lbl" x="85" y="24">SinusoidalEmbedding</text>
+          <text class="sub" x="85" y="40">→ 256-dim</text>
+        </g>
+        <g class="node leaf" data-node="mlp_1" transform="translate(340, 130)">
+          <rect width="120" height="52" />
+          <text class="lbl" x="60" y="24">Linear</text>
+          <text class="sub" x="60" y="40">256 → 1024</text>
+        </g>
+        <g class="node leaf" data-node="silu_time" transform="translate(490, 130)">
+          <rect width="70" height="52" />
+          <text class="lbl" x="35" y="24">SiLU</text>
+        </g>
+        <g class="node leaf" data-node="mlp_2" transform="translate(590, 130)">
+          <rect width="120" height="52" />
+          <text class="lbl" x="60" y="24">Linear</text>
+          <text class="sub" x="60" y="40">1024 → 256</text>
+        </g>
+        <g class="node leaf" data-node="temb_out" transform="translate(740, 130)">
+          <rect width="120" height="52" />
+          <text class="lbl" x="60" y="24">temb</text>
+          <text class="sub" x="60" y="40">256-dim</text>
+        </g>
+
+        <line class="arrow" x1="110" y1="156" x2="140" y2="156" />
+        <line class="arrow" x1="310" y1="156" x2="340" y2="156" />
+        <line class="arrow" x1="460" y1="156" x2="490" y2="156" />
+        <line class="arrow" x1="560" y1="156" x2="590" y2="156" />
+        <line class="arrow" x1="710" y1="156" x2="740" y2="156" />
+      </svg>
+    </div>
+
+    <!-- =========== VIEW: sinusoidal_embed =========== -->
+    <div class="view" data-view="sinusoidal_embed">
+      <svg viewBox="0 0 900 300">
+        <text class="group-label" x="30" y="30">SinusoidalEmbedding</text>
+        <text class="flow-label" x="30" y="50">geometric-spaced angular_speeds buffer → sin(θt), cos(θt) concat</text>
+
+        <g class="node leaf" data-node="in_t" transform="translate(30, 130)">
+          <rect width="80" height="52" />
+          <text class="lbl" x="40" y="24">t/T</text>
+          <text class="sub" x="40" y="40">normalized</text>
+        </g>
+        <g class="node leaf" data-node="angular_speeds" transform="translate(160, 130)">
+          <rect width="180" height="52" />
+          <text class="lbl" x="90" y="24">angular_speeds</text>
+          <text class="sub" x="90" y="40">buffer, geometric grid</text>
+        </g>
+        <g class="node leaf" data-node="sin_cos_concat" transform="translate(370, 130)">
+          <rect width="180" height="52" />
+          <text class="lbl" x="90" y="24">concat(sin, cos)</text>
+          <text class="sub" x="90" y="40">→ 256-dim</text>
+        </g>
+
+        <line class="arrow" x1="110" y1="156" x2="160" y2="156" />
+        <line class="arrow" x1="340" y1="156" x2="370" y2="156" />
+      </svg>
+    </div>
+
+    <!-- =========== VIEW: temb_pipeline (Additive/FiLM) =========== -->
+    <div class="view" data-view="temb_pipeline_add">
+      <svg viewBox="0 0 900 320">
+        <text class="group-label" x="30" y="30">AdditiveTimeConditioning</text>
+        <text class="flow-label" x="30" y="50">temb → Linear projection → add to feature map → GroupNorm</text>
+
+        <g class="node leaf" data-node="temb_in" transform="translate(30, 140)">
+          <rect width="120" height="52" />
+          <text class="lbl" x="60" y="24">temb</text>
+          <text class="sub" x="60" y="40">256-dim</text>
+        </g>
+        <g class="node leaf" data-node="temb_proj" transform="translate(180, 140)">
+          <rect width="120" height="52" />
+          <text class="lbl" x="60" y="24">Linear</text>
+          <text class="sub" x="60" y="40">256 → C_out</text>
+        </g>
+        <g class="node leaf" data-node="temb_add" transform="translate(330, 140)">
+          <rect width="140" height="52" />
+          <text class="lbl" x="70" y="24">+ x</text>
+          <text class="sub" x="70" y="40">broadcast add</text>
+        </g>
+        <g class="node leaf" data-node="temb_norm" transform="translate(500, 140)">
+          <rect width="120" height="52" />
+          <text class="lbl" x="60" y="24">GroupNorm</text>
+          <text class="sub" x="60" y="40">n_groups=32</text>
+        </g>
+
+        <line class="arrow" x1="150" y1="166" x2="180" y2="166" />
+        <line class="arrow" x1="300" y1="166" x2="330" y2="166" />
+        <line class="arrow" x1="470" y1="166" x2="500" y2="166" />
+
+        <text class="flow-label" x="400" y="230" text-anchor="middle">
+          FiLM variant: same shape but projects to 2C_out and applies scale &amp; shift
+        </text>
+      </svg>
+    </div>
+
+    <!-- =========== VIEW: out_head =========== -->
+    <div class="view" data-view="out_head">
+      <svg viewBox="0 0 900 260">
+        <text class="group-label" x="30" y="30">out_head</text>
+        <text class="flow-label" x="30" y="50">GroupNorm → SiLU → Conv 3×3, reduces the last feature map back to 4 latent channels</text>
+
+        <g class="node leaf" data-node="oh_in" transform="translate(30, 120)">
+          <rect width="100" height="52" />
+          <text class="lbl" x="50" y="24">x</text>
+          <text class="sub" x="50" y="40">B, 128, 64²</text>
+        </g>
+        <g class="node leaf" data-node="oh_norm" transform="translate(160, 120)">
+          <rect width="130" height="52" />
+          <text class="lbl" x="65" y="24">GroupNorm</text>
+          <text class="sub" x="65" y="40">n_groups=32</text>
+        </g>
+        <g class="node leaf" data-node="oh_silu" transform="translate(320, 120)">
+          <rect width="70" height="52" />
+          <text class="lbl" x="35" y="24">SiLU</text>
+        </g>
+        <g class="node leaf" data-node="oh_conv" transform="translate(420, 120)">
+          <rect width="130" height="52" />
+          <text class="lbl" x="65" y="24">Conv 3×3</text>
+          <text class="sub" x="65" y="40">128 → 4</text>
+        </g>
+        <g class="node leaf" data-node="oh_out" transform="translate(580, 120)">
+          <rect width="130" height="52" />
+          <text class="lbl" x="65" y="24">ε̂</text>
+          <text class="sub" x="65" y="40">B, 4, 64²</text>
+        </g>
+
+        <line class="arrow" x1="130" y1="146" x2="160" y2="146" />
+        <line class="arrow" x1="290" y1="146" x2="320" y2="146" />
+        <line class="arrow" x1="390" y1="146" x2="420" y2="146" />
+        <line class="arrow" x1="550" y1="146" x2="580" y2="146" />
+      </svg>
+    </div>
+
+    <!-- =========== VIEW: sampler_loop =========== -->
+    <div class="view" data-view="sampler_loop">
+      <svg viewBox="0 0 900 340">
+        <text class="group-label" x="30" y="30">Sampler loop</text>
+        <text class="flow-label" x="30" y="50">DDIM η=0 and DPM-Solver++ multistep both use the same trained model; different reverse updates</text>
+
+        <g class="node leaf" data-node="x_T_init" transform="translate(30, 150)">
+          <rect width="110" height="60" />
+          <text class="lbl" x="55" y="30">x_T</text>
+          <text class="sub" x="55" y="46">∼ N(0, I)</text>
+        </g>
+        <g class="node leaf" data-node="loop_body" transform="translate(180, 150)">
+          <rect width="220" height="60" />
+          <text class="lbl" x="110" y="30">for t in schedule</text>
+          <text class="sub" x="110" y="46">DDIM or DPM++ 2M step</text>
+        </g>
+        <g class="node leaf" data-node="loop_step" transform="translate(440, 150)">
+          <rect width="220" height="60" />
+          <text class="lbl" x="110" y="30">CFG-wrapped model call</text>
+          <text class="sub" x="110" y="46">εθ(xₜ, t, uncond/cond)</text>
+        </g>
+        <g class="node leaf" data-node="x_0_return" transform="translate(700, 150)">
+          <rect width="170" height="60" />
+          <text class="lbl" x="85" y="30">return x_0 est</text>
+          <text class="sub" x="85" y="46">cleaner than x_t</text>
+        </g>
+
+        <line class="arrow" x1="140" y1="180" x2="180" y2="180" />
+        <line class="arrow" x1="400" y1="180" x2="440" y2="180" />
+        <line class="arrow" x1="660" y1="180" x2="700" y2="180" />
+
+        <path class="skip" d="M 290 210 L 290 260 L 550 260 L 550 210" />
+        <text class="flow-label" x="420" y="284" text-anchor="middle">↺ iterate T (or fewer with DPM++) steps</text>
+      </svg>
+    </div>
+
+  </div>
+</section>
+
+<!-- ============ PROSE SECTIONS ============ -->
+<section id="overview">
+  <span class="section-mark">§ 01 — Overview</span>
+  <h2>What this document is.</h2>
+  <div class="prose">
+    <p>
+      A companion to the <a href="index.html">gallery</a>. The gallery shows
+      what the model produces; this page explains <em>how</em> it works.
+    </p>
+    <p>
+      The canvas above lets you drill in as far as PyTorch modules go &mdash;
+      click any composite box to zoom into its internals; click any leaf
+      (a plain <code>nn</code> module) to read its role in a side drawer.
+      The written sections below cover the same territory statically, plus
+      the math, the training loop, the sampling loop, and an annotated
+      config.
+    </p>
+  </div>
+</section>
+
+<section id="pipeline">
+  <span class="section-mark">§ 02 — Pipeline</span>
+  <h2>Real image ↔ latent ↔ sample.</h2>
+  <div class="prose">
+    <p>
+      The whole system is a Latent Diffusion Model (LDM). Rather than
+      operate on pixels directly, everything happens inside the 4-channel
+      64×64 latent space of Stability's <code>sd-vae-ft-mse</code> VAE.
+      Training encodes AFHQ images once, caches the latents to disk, and
+      never runs the VAE encoder again. Sampling runs the VAE decoder
+      exactly once at the end to bring the final latent back to a 512×512
+      RGB image.
+    </p>
+    <p>
+      Latents are scaled by a training-time constant
+      (<code>scaling_const = 0.18215</code>, matching SD's convention) so
+      the diffusion process operates on a distribution with roughly unit
+      variance.
+    </p>
+  </div>
+</section>
+
+<section id="unet">
+  <span class="section-mark">§ 03 — UNet</span>
+  <h2>Encoder → bottleneck → decoder.</h2>
+  <div class="prose">
+    <p>
+      The denoiser is a standard 4-level UNet operating on 4×64² latents.
+      Three <code>DownBlock</code>s halve the spatial dimensions
+      (64² → 32² → 16² → 8²) while widening the channel count
+      (128 → 256 → 384 → 512). A <code>MidBlock</code> at the bottleneck
+      alternates ResBlocks with self-attention. Three <code>UpBlock</code>s
+      mirror the decoder, consuming the skip connections harvested from
+      the down path.
+    </p>
+    <p>
+      Attention lives at the two deeper resolutions
+      (<code>attn_levels = [false, true, true]</code>) and inside the
+      bottleneck. It's skipped at the top level because
+      <code>MultiheadAttention</code> at 64² is quadratically expensive
+      and the pixels there don't need long-range interaction yet.
+    </p>
+    <p>
+      The time+class embedding is a separate rail: an integer timestep
+      goes through a sinusoidal encoder plus a small MLP, and the class
+      embedding table adds into that same vector. The result
+      (<code>temb</code>, 256-dim) is injected into every ResBlock via
+      an additive time-conditioning module.
+    </p>
+  </div>
+</section>
+
+<section id="blocks">
+  <span class="section-mark">§ 04 — Blocks</span>
+  <h2>The building blocks.</h2>
+  <div class="prose">
+    <p>
+      Every block in the UNet is one of five patterns. Click the
+      matching node in the canvas above to see it live.
+    </p>
+    <h3>ResidualBlock</h3>
+    <p>
+      Two convolutional layers with time-embedding injection between
+      them, wrapped in a residual connection. GroupNorm + SiLU for
+      activations; a small dropout after the second SiLU. When input and
+      output channel counts differ, the residual path uses a 1×1
+      projection; otherwise identity.
+    </p>
+    <h3>AttentionBlock</h3>
+    <p>
+      Standard spatial self-attention, computed by flattening H×W into a
+      sequence dimension and running <code>nn.MultiheadAttention</code>
+      with <code>need_weights=False</code> (which triggers PyTorch's
+      fused SDPA path). The residual around the attention path is
+      essential &mdash; without it, attention <em>replaces</em> its
+      input rather than refining it.
+    </p>
+    <h3>DownBlock &amp; UpBlock</h3>
+    <p>
+      A DownBlock is <code>block_depth × ResidualBlock</code> (harvesting
+      skip tensors along the way) → optional AttentionBlock → stride-2
+      3×3 conv for downsampling. The UpBlock is the mirror: nearest
+      upsample followed by a 3×3 conv (the conv is essential to avoid
+      checkerboard artifacts), then ResBlocks that concatenate the skip
+      tensor as extra input channels, then an optional AttentionBlock.
+    </p>
+    <h3>MidBlock</h3>
+    <p>
+      An alternating res→attn→res→attn→…→res sandwich at the bottleneck
+      resolution. <code>n_res_blocks = 3</code> ResBlocks with attention
+      interleaved between them &mdash; the model's chance to do
+      long-range reasoning on a small spatial grid.
+    </p>
+    <h3>Time-conditioning modules</h3>
+    <p>
+      Two variants supported via the <code>time_embedding_norm</code>
+      config: <code>additive</code> (project temb to C_out channels and
+      add) and <code>film</code> (project to 2·C_out and apply
+      scale/shift, a la FiLM). Default is additive.
+    </p>
+  </div>
+</section>
+
+<section id="math">
+  <span class="section-mark">§ 05 — Math</span>
+  <h2>Forward, reverse, and the samplers.</h2>
+  <div class="prose">
+    <h3>Forward process</h3>
+    <p>
+      Given a clean latent <code>x₀</code>, the forward process produces
+      a noised sample at any timestep <em>t</em>:
+    </p>
+<pre>x_t = α(t) · x₀ + σ(t) · ε,     ε ∼ N(0, I)</pre>
+    <p>
+      The cosine schedule sets angles between <code>acos(sched_max)</code>
+      and <code>acos(sched_min)</code>, and defines
+      <code>α(t) = cos(angle(t))</code>, <code>σ(t) = sin(angle(t))</code>.
+    </p>
+
+    <h3>Reverse (DDIM η=0)</h3>
+<pre>x̂₀ = (x_t − σ_t · ε̂) / α_t
+x_{t−1} = α_{t−1} · x̂₀ + √(1 − α²_{t−1}) · ε̂</pre>
+
+    <h3>Reverse (DPM-Solver++ 2M multistep)</h3>
+<pre>x̂₀_effective = (3/2) · x̂₀_t − (1/2) · x̂₀_{t+Δ}       (Adams-Bashforth 2M)
+x_{t−1} = (σ_{t−1}/σ_t) · x_t + α_{t−1} · (1 − e^{−h}) · x̂₀_effective
+h = log(α_{t−1}/σ_{t−1}) − log(α_t/σ_t)</pre>
+    <p>
+      Higher orders (3M) use one more cached x̂₀ and different
+      Adams-Bashforth coefficients &mdash; computed at runtime by solving
+      a small Vandermonde system in <code>_compute_ab</code>.
+    </p>
+  </div>
+</section>
+
+<section id="training">
+  <span class="section-mark">§ 06 — Training</span>
+  <h2>The loop, in ~15 lines.</h2>
+  <div class="prose">
+<pre><span class="cm"># DiffusionModel.train(), simplified</span>
+<span class="kw">for</span> img, class_idx <span class="kw">in</span> loader:
+    t   = torch.randint(0, T, (B,))
+    eps = torch.randn_like(img)
+    sr, nr = signal_rates[t], noise_rates[t]
+    noisy  = sr·img + nr·eps
+
+    <span class="cm"># CFG training: mask a fraction of class labels to null</span>
+    <span class="kw">if</span> torch.rand(B) &lt; uncond_prob:
+        class_idx = 0
+
+    <span class="kw">with</span> autocast(bf16 <span class="kw">if</span> supported <span class="kw">else</span> fp16):
+        eps_pred = model(noisy, t, class_idx)
+        loss     = MSE(eps_pred, eps)
+
+    scaler.scale(loss).backward()
+    scaler.unscale_(opt); clip_grad_norm_(1.0)
+    scaler.step(opt); scaler.update()
+    ema.update_parameters(model)</pre>
+    <p>
+      Notes worth pointing at: bf16 is chosen automatically on Ampere+
+      (with an fp16 fallback), the EMA has decay 0.9999, and gradients
+      are clipped to global norm 1.0 before every step.
+    </p>
+  </div>
+</section>
+
+<section id="sampling">
+  <span class="section-mark">§ 07 — Sampling</span>
+  <h2>Two samplers, one model.</h2>
+  <div class="prose">
+    <p>
+      Both DDIM and DPM-Solver++ multistep share the sampling scaffolding
+      &mdash; timestep schedule, CFG wrap, x₀ return trick at the end.
+      They differ only in the update rule inside the loop.
+    </p>
+<pre><span class="cm"># DiffusionModel.sample(), simplified</span>
+x = torch.randn(size)
+schedule = linspace(T-1, 0, n_steps + 1).long()
+
+<span class="kw">for</span> t, t_prev <span class="kw">in</span> zip(schedule[:-1], schedule[1:]):
+    <span class="kw">with</span> autocast(...):
+        eps = cfg_wrap(ema, x, t, class_labels, guidance_scale)
+    x_0 = (x − nr[t]·eps) / sr[t]
+
+    <span class="kw">if</span> dpmpp_order:
+        <span class="cm"># DPM++ multistep: extrapolate x_0 from cached prev estimates</span>
+        x_0_prev.insert(0, x_0)
+        coeff = _compute_ab(dpmpp_order)
+        x_0_eff = sum(c·x <span class="kw">for</span> c, x <span class="kw">in</span> zip(coeff, x_0_prev))
+        h  = log(sr[t_prev]/nr[t_prev]) − log(sr[t]/nr[t])
+        x  = (nr[t_prev]/nr[t])·x + sr[t_prev]·(1 − exp(−h))·x_0_eff
+    <span class="kw">else</span>:
+        <span class="cm"># DDIM η-parameterized update</span>
+        sigma = eta · (nr[t_prev]/nr[t]) · √(1 − sr[t]²/sr[t_prev]²)
+        x = sr[t_prev]·x_0 + √(1 − sr[t_prev]² − sigma²)·eps + sigma·randn()
+
+<span class="kw">return</span> x_0   <span class="cm"># cleaner than x at the last step (cosine schedule)</span></pre>
+  </div>
+</section>
+
+<section id="config">
+  <span class="section-mark">§ 08 — Config</span>
+  <h2>Annotated <code>params.yml</code>.</h2>
+  <div class="prose">
+    <table class="config-table">
+      <thead><tr><th>key</th><th>value</th><th>meaning</th></tr></thead>
+      <tbody>
+        <tr><td class="k">device</td><td class="v">cuda</td><td class="note">always GPU</td></tr>
+        <tr><td class="k">batch_size</td><td class="v">128</td><td class="note">UNet training batch on the cached latents</td></tr>
+        <tr><td class="k">lr</td><td class="v">0.0001</td><td class="note">AdamW learning rate — diffusion is LR-sensitive</td></tr>
+        <tr><td class="k">grad_norm</td><td class="v">1.0</td><td class="note">global-norm gradient clip</td></tr>
+        <tr><td class="k">time_const</td><td class="v">1000</td><td class="note">T — total noise levels the model is trained on</td></tr>
+        <tr><td class="k">conditional</td><td class="v">true</td><td class="note">enables the class embedding table</td></tr>
+        <tr><td class="k">uncond_prob</td><td class="v">0.1</td><td class="note">fraction of training samples masked to null class (for CFG)</td></tr>
+        <tr><td class="k">time_embedding_norm</td><td class="v">additive</td><td class="note">how temb is injected into ResBlocks (or <code>film</code>)</td></tr>
+        <tr><td class="k">block_depth</td><td class="v">2</td><td class="note">ResBlocks per Down/UpBlock level</td></tr>
+        <tr><td class="k">block_sizes</td><td class="v">[128, 256, 384, 512]</td><td class="note">channel widths at each of the 4 levels</td></tr>
+        <tr><td class="k">n_res_blocks</td><td class="v">3</td><td class="note">ResBlocks in the MidBlock, interleaved with attention</td></tr>
+        <tr><td class="k">noise_embed_dim</td><td class="v">256</td><td class="note">time and class embedding dimension</td></tr>
+        <tr><td class="k">n_attn_heads</td><td class="v">8</td><td class="note">attention heads (head_dim = channels / 8)</td></tr>
+        <tr><td class="k">attn_levels</td><td class="v">[false, true, true]</td><td class="note">attention at each DownBlock transition; skip top level</td></tr>
+        <tr><td class="k">n_groups</td><td class="v">32</td><td class="note">GroupNorm groups</td></tr>
+        <tr><td class="k">dropout</td><td class="v">0.1</td><td class="note">ResBlock dropout — helps on the small AFHQ dataset</td></tr>
+        <tr><td class="k">beta_schedule</td><td class="v">cosine</td><td class="note">smoother SNR curve than linear</td></tr>
+        <tr><td class="k">sched_min</td><td class="v">0.02</td><td class="note">signal_rate at t = T−1</td></tr>
+        <tr><td class="k">sched_max</td><td class="v">0.95</td><td class="note">signal_rate at t = 0 (note: not 1.0)</td></tr>
+        <tr><td class="k">prediction_type</td><td class="v">epsilon</td><td class="note">predict noise (alternatives: sample, v_prediction)</td></tr>
+        <tr><td class="k">ema_decay</td><td class="v">0.9999</td><td class="note">effective averaging window ≈ 10k steps</td></tr>
+        <tr><td class="k">pretrained_vae_name</td><td class="v">stabilityai/sd-vae-ft-mse</td><td class="note">the tuned SD VAE</td></tr>
+        <tr><td class="k">scaling_const</td><td class="v">0.18215</td><td class="note">official SD latent-scaling constant</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="refs">
+  <span class="section-mark">§ 09 — References</span>
+  <h2>Papers this stands on.</h2>
+  <div class="prose">
+    <ul>
+      <li>Ho, Jain, Abbeel (2020). <a href="https://arxiv.org/abs/2006.11239">Denoising Diffusion Probabilistic Models</a>.</li>
+      <li>Song, Meng, Ermon (2020). <a href="https://arxiv.org/abs/2010.02502">Denoising Diffusion Implicit Models</a>.</li>
+      <li>Nichol, Dhariwal (2021). <a href="https://arxiv.org/abs/2102.09672">Improved DDPM</a> (cosine schedule).</li>
+      <li>Song et al. (2021). <a href="https://arxiv.org/abs/2011.13456">Score-Based Generative Modeling through SDEs</a> (probability-flow ODE).</li>
+      <li>Ho, Salimans (2022). <a href="https://arxiv.org/abs/2207.12598">Classifier-Free Diffusion Guidance</a>.</li>
+      <li>Rombach et al. (2022). <a href="https://arxiv.org/abs/2112.10752">High-Resolution Image Synthesis with Latent Diffusion Models</a>.</li>
+      <li>Karras et al. (2022). <a href="https://arxiv.org/abs/2206.00364">Elucidating the Design Space of Diffusion-Based Generative Models (EDM)</a>.</li>
+      <li>Lu et al. (2022a). <a href="https://arxiv.org/abs/2206.00927">DPM-Solver</a>.</li>
+      <li>Lu et al. (2022b). <a href="https://arxiv.org/abs/2211.01095">DPM-Solver++</a>.</li>
+      <li>Choi et al. (2020). <a href="https://arxiv.org/abs/1912.01865">StarGAN v2</a> (AFHQ dataset).</li>
+    </ul>
+  </div>
+</section>
+
+<div class="coda">
+  <h3>Back to the gallery.</h3>
+  <p>Every panel on the <a href="index.html">gallery page</a> is an
+    empirical view of the model described here.</p>
+</div>
+
+<footer>
+  Ben Benyamin ·
+  <a href="https://github.com/BenBenyamin/VerboseDiffusion" target="_blank" rel="noopener">github.com/BenBenyamin/VerboseDiffusion</a>
+</footer>
+
+</main>
+
+</div>
+
+<!-- Info drawer -->
+<div class="drawer-backdrop" id="drawer-backdrop"></div>
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <button class="drawer-close" id="drawer-close">Close · Esc</button>
+  <div class="drawer-head">
+    <p class="drawer-eyebrow" id="drawer-eyebrow">—</p>
+    <h3 class="drawer-title" id="drawer-title">—</h3>
+    <p class="drawer-subtitle" id="drawer-subtitle">—</p>
+  </div>
+  <div class="drawer-body" id="drawer-body"></div>
+</aside>
+
+<script>
+/* ================================================================
+   Node info map — one entry per clickable element in every view
+   ================================================================ */
+const NODES = {
+  /* ---- Pipeline view ---- */
+  real_image: {
+    eyebrow: "input",
+    title: "Real AFHQ image",
+    subtitle: "PIL.Image → torch.Tensor · shape (3, 512, 512)",
+    body: `<p>The raw input during training — a 512×512 animal face from the AFHQ dataset, normalized to [−1, 1].</p>
+      <h4>Preprocessing</h4>
+      <p><code>torchvision.transforms.Compose([RandomHorizontalFlip, ToTensor, Normalize((0.5)×3, (0.5)×3)])</code>.
+      Horizontal flip is the only augmentation — animal faces are approximately symmetric.</p>`,
+  },
+  vae_encoder: {
+    eyebrow: "external module",
+    title: "VAE encoder",
+    subtitle: "diffusers.AutoencoderKL · 3×512² → 4×64²",
+    body: `<p>Stability's pretrained <code>sd-vae-ft-mse</code> encoder. Compresses pixels 8× spatially and re-projects to 4 latent channels.
+      Weights are frozen; the encoder runs <em>once</em> during dataset preprocessing and never again.</p>
+      <h4>Why cache latents</h4>
+      <p>Running the VAE encoder inside the training loop would dominate wall-clock. Encoding the 15k AFHQ images once
+      into a <code>TensorDataset</code> makes every training step pure UNet + optimizer.</p>`,
+  },
+  latent: {
+    eyebrow: "tensor",
+    title: "Latent x₀",
+    subtitle: "torch.Tensor · shape (B, 4, 64, 64)",
+    body: `<p>Encoded latent, scaled by <code>scaling_const = 0.18215</code>.
+      This is what the diffusion process actually operates on.</p>`,
+  },
+  forward_noise: {
+    eyebrow: "training step",
+    title: "Forward noising",
+    subtitle: "x_t = α(t) · x₀ + σ(t) · ε",
+    body: `<p>Sample <code>t ∼ Uniform{0, T−1}</code> and <code>ε ∼ N(0, I)</code>,
+      then produce the noised sample in closed form.</p>
+      <p>The training objective is MSE between the model's ε prediction and the actual ε that was added.</p>`,
+  },
+  noise_schedule: {
+    eyebrow: "buffer",
+    title: "Cosine noise schedule",
+    subtitle: "signal_rates, noise_rates · shape (T,)",
+    body: `<p>Precomputed once in <code>DiffusionModel.__init__</code>. For each timestep:</p>
+      <pre>angle(t)  = linspace(acos(0.95), acos(0.02), T)
+signal_rate(t) = cos(angle(t))    <span class="cm"># α</span>
+noise_rate(t)  = sin(angle(t))    <span class="cm"># σ</span></pre>
+      <p>Note: <code>signal_rate(0) ≈ 0.95</code>, not 1. The forward process never reaches perfectly clean data,
+      which is why the sampler returns the final <code>x_0</code> estimate rather than <code>x_t</code>.</p>`,
+  },
+  unet: {
+    eyebrow: "composite",
+    title: "UNet",
+    subtitle: "custom nn.Module · click box to zoom in",
+    body: `<p>The denoiser. Predicts the noise ε that was added given a noisy latent, a timestep, and a class label.</p>`,
+    zoom: "unet",
+  },
+  sampler_loop: {
+    eyebrow: "loop",
+    title: "Sampler loop",
+    subtitle: "DDIM or DPM-Solver++ multistep · click to see internals",
+    body: `<p>Iterates a reverse-process schedule from t = T − 1 down to 0, calling the UNet at each step with CFG,
+      updating the latent via DDIM or DPM++ rules.</p>`,
+    zoom: "sampler_loop",
+  },
+  vae_decoder: {
+    eyebrow: "external module",
+    title: "VAE decoder",
+    subtitle: "diffusers.AutoencoderKL · 4×64² → 3×512²",
+    body: `<p>Same pretrained SD VAE, decoder side. Called <em>once</em> at the end of sampling to turn the final
+      latent back into a 512×512 RGB image.</p>`,
+  },
+  sample_output: {
+    eyebrow: "output",
+    title: "Sample",
+    subtitle: "torch.Tensor · shape (3, 512, 512)",
+    body: `<p>Decoded latent, clamped to <code>[−1, 1]</code> then rescaled to <code>[0, 1]</code> for display.</p>`,
+  },
+  class_input: {
+    eyebrow: "input",
+    title: "Class label c",
+    subtitle: "int · ∈ {0 (null), 1 (cat), 2 (dog), 3 (wild)}",
+    body: `<p>Model-space class index. Row 0 is reserved for the null class, used by classifier-free guidance.
+      User-facing indices (0/1/2) get bumped by +1 in <code>generate()</code>.</p>`,
+  },
+  timestep_input: {
+    eyebrow: "input",
+    title: "Timestep t",
+    subtitle: "int · ∈ {0..T−1}",
+    body: `<p>Discrete noise level. During training, sampled uniformly per batch. During sampling, iterated backward
+      through a schedule of the model's chosen number of steps.</p>`,
+  },
+
+  /* ---- UNet view ---- */
+  noise_pipeline: {
+    eyebrow: "composite",
+    title: "noise_pipeline",
+    subtitle: "SinusoidalEmbedding → Linear → SiLU → Linear",
+    body: `<p>The time-embedding rail. Turns the integer timestep <code>t</code> into a 256-dim vector
+      that will be added into every ResBlock's normalization.</p>`,
+    zoom: "noise_pipeline",
+  },
+  class_embd: {
+    eyebrow: "nn.Embedding",
+    title: "class_embd",
+    subtitle: "nn.Embedding(n_classes + 1, noise_embed_dim=256)",
+    body: `<p>A tiny lookup table: 4 rows of 256 numbers each. Row 0 is the null class, rows 1..3 are cat/dog/wild.
+      The retrieved vector is added to the time embedding before it reaches the ResBlocks.</p>`,
+  },
+  input_conv: {
+    eyebrow: "nn.Conv2d",
+    title: "input_conv",
+    subtitle: "Conv2d(4, 128, kernel=3, padding=1)",
+    body: `<p>Projects the 4-channel latent input up to the UNet's first channel width (128).</p>`,
+  },
+  down_block_0: { eyebrow: "composite", title: "DownBlock 0", subtitle: "128 → 256 · 64² → 32² · no attn", body: `<p>First encoder stage. Two ResBlocks then a stride-2 downsample. No attention at this resolution.</p>`, zoom: "down_block_0" },
+  down_block_1: { eyebrow: "composite", title: "DownBlock 1", subtitle: "256 → 384 · 32² → 16² · attn", body: `<p>Second encoder stage. AttentionBlock inserted after the ResBlocks, before the downsample.</p>`, zoom: "down_block_1" },
+  down_block_2: { eyebrow: "composite", title: "DownBlock 2", subtitle: "384 → 512 · 16² → 8² · attn", body: `<p>Third encoder stage. Feeds into the MidBlock at the 8² bottleneck.</p>`, zoom: "down_block_2" },
+  mid_block: { eyebrow: "composite", title: "MidBlock", subtitle: "512, 8² · res⇄attn sandwich", body: `<p>Bottleneck. Alternating ResBlocks and attention modules — the model's chance to do long-range reasoning.</p>`, zoom: "mid_block" },
+  up_block_0: { eyebrow: "composite", title: "UpBlock 0", subtitle: "512 → 384 · 8² → 16² · attn", body: `<p>Deepest decoder stage. Consumes DownBlock 2's skip.</p>`, zoom: "up_block_0" },
+  up_block_1: { eyebrow: "composite", title: "UpBlock 1", subtitle: "384 → 256 · 16² → 32² · attn", body: `<p>Consumes DownBlock 1's skip.</p>`, zoom: "up_block_1" },
+  up_block_2: { eyebrow: "composite", title: "UpBlock 2", subtitle: "256 → 128 · 32² → 64² · no attn", body: `<p>Final decoder stage before the output head.</p>`, zoom: "up_block_2" },
+  out_head: { eyebrow: "nn.Sequential", title: "out_head", subtitle: "GroupNorm → SiLU → Conv 3×3 (128 → 4)", body: `<p>Final projection back to 4 latent channels — the predicted noise <code>ε̂</code>.</p>`, zoom: "out_head" },
+
+  /* ---- Blocks (leaves) ---- */
+  norm1: {
+    eyebrow: "nn.GroupNorm",
+    title: "GroupNorm",
+    subtitle: "n_groups = 32, eps = 1e-6",
+    body: `<p>Normalizes activations within groups of channels. Preferred over BatchNorm here because it doesn't
+      depend on batch statistics — cleaner behavior across training/eval and different batch sizes.</p>`,
+  },
+  silu_1: { eyebrow: "nn.SiLU", title: "SiLU", subtitle: "x · sigmoid(x)", body: `<p>Smooth ReLU-alternative activation, the current default in most diffusion architectures.</p>` },
+  silu_2: { eyebrow: "nn.SiLU", title: "SiLU", subtitle: "x · sigmoid(x)", body: `<p>Second activation, after the time-embedding injection.</p>` },
+  silu_time: { eyebrow: "nn.SiLU", title: "SiLU", subtitle: "x · sigmoid(x)", body: `<p>Non-linearity between the two MLP layers of the time embedding rail.</p>` },
+  conv1: {
+    eyebrow: "nn.Conv2d",
+    title: "Conv 3×3 (first)",
+    subtitle: "kernel=3, padding=1",
+    body: `<p>First convolution in the ResBlock, projecting from input to output channel count.</p>`,
+  },
+  conv2: {
+    eyebrow: "nn.Conv2d",
+    title: "Conv 3×3 (second)",
+    subtitle: "kernel=3, padding=1",
+    body: `<p>Second convolution, preserving channel count.</p>`,
+  },
+  dropout: {
+    eyebrow: "nn.Dropout",
+    title: "Dropout",
+    subtitle: "p = 0.1",
+    body: `<p>Regularization on the small AFHQ dataset. Applied between the second activation and the second convolution.</p>`,
+  },
+  temb_pipeline_add: {
+    eyebrow: "composite",
+    title: "AdditiveTimeConditioning",
+    subtitle: "Linear(256, C_out) → add to x → GroupNorm",
+    body: `<p>Custom nn.Module. Projects the temb vector to <code>C_out</code> channels and adds it broadcast-wise to the feature map,
+      then applies GroupNorm. FiLM variant available via <code>time_embedding_norm = "film"</code>.</p>`,
+    zoom: "temb_pipeline_add",
+  },
+  temb_in: { eyebrow: "tensor", title: "temb (input)", subtitle: "256-dim vector", body: `<p>The time+class embedding produced by the noise_pipeline plus class_embd lookup.</p>` },
+  temb_proj: { eyebrow: "nn.Linear", title: "Linear", subtitle: "256 → C_out", body: `<p>Projects temb into the channel space of the current feature map.</p>` },
+  temb_add: { eyebrow: "op", title: "Broadcast add", subtitle: "x + proj(temb)[:, :, None, None]", body: `<p>Adds the (B, C_out) vector to every spatial location.</p>` },
+  temb_norm: { eyebrow: "nn.GroupNorm", title: "GroupNorm", subtitle: "n_groups = 32", body: `<p>Normalizes after the time embedding is added.</p>` },
+  res_shortcut: {
+    eyebrow: "Identity or Conv 1×1",
+    title: "Residual shortcut",
+    subtitle: "nn.Identity() if in==out else Conv2d(in, out, 1)",
+    body: `<p>The residual path around the two conv layers. When input and output channel counts match, it's just identity.
+      Otherwise, a 1×1 conv projects to match.</p>`,
+  },
+  residual_add: { eyebrow: "op", title: "Residual add", subtitle: "x + shortcut", body: `<p>The final sum that makes it a "residual" block.</p>` },
+  in_x: { eyebrow: "tensor", title: "x (input)", subtitle: "B, C, H, W", body: `<p>Input feature map to the block.</p>` },
+
+  /* Attention */
+  attn_block: { eyebrow: "composite", title: "AttentionBlock", subtitle: "self-attention over flattened HW", body: `<p>Custom nn.Module. Spatial self-attention with a residual around it.</p>`, zoom: "attn_block" },
+  attn_norm: { eyebrow: "nn.GroupNorm", title: "GroupNorm", subtitle: "n_groups = 32", body: `<p>Pre-attention normalization.</p>` },
+  attn_flatten: { eyebrow: "op", title: "Flatten HW", subtitle: "(B, C, H, W) → (B, HW, C)", body: `<p>Reshape to a sequence for the attention module.</p>` },
+  mha: {
+    eyebrow: "nn.MultiheadAttention",
+    title: "MultiheadAttention",
+    subtitle: "n_heads = 8 · batch_first = True",
+    body: `<p>Standard self-attention. Called with <code>need_weights=False</code> which triggers PyTorch's fused
+      <code>scaled_dot_product_attention</code> path — flash-attn on capable GPUs.</p>`,
+  },
+  attn_linear: { eyebrow: "nn.Linear", title: "Linear (proj)", subtitle: "C → C", body: `<p>Output projection after the attention.</p>` },
+  attn_unflatten: { eyebrow: "op", title: "Unflatten HW", subtitle: "(B, HW, C) → (B, C, H, W)", body: `<p>Reshape back to a feature map.</p>` },
+  attn_residual_add: {
+    eyebrow: "op — essential",
+    title: "Residual add",
+    subtitle: "x + attn_out",
+    body: `<p><strong>The residual is essential.</strong> Without it, the attention block <em>replaces</em>
+      its input rather than refining it. An early bug in this codebase — omitted residual meant attention was
+      net-destructive, producing blob-like outputs.</p>`,
+  },
+  downsample: {
+    eyebrow: "nn.Conv2d",
+    title: "Downsample",
+    subtitle: "Conv2d(C, C, kernel=3, stride=2, padding=1)",
+    body: `<p>Learned stride-2 downsample. Preferred over average pooling because it lets the model learn its own
+      downsampling filter.</p>`,
+  },
+
+  /* UpBlock leaves */
+  upsample_conv: {
+    eyebrow: "nn.Sequential",
+    title: "Upsample + Conv",
+    subtitle: "Upsample(scale=2, nearest) → Conv 3×3",
+    body: `<p>Nearest-neighbor upsample followed by a 3×3 conv. The conv is essential — bare nearest upsample
+      produces blocky checkerboard artifacts. Another early bug that was fixed.</p>`,
+  },
+  skip_concat: {
+    eyebrow: "op",
+    title: "Concat skip",
+    subtitle: "torch.cat([x, skip], dim=1)",
+    body: `<p>Concatenates the skip tensor from the matching DownBlock along the channel dimension.
+      This doubles the input channel count of the following ResBlock.</p>`,
+  },
+
+  /* Time embedding pipeline */
+  in_t: { eyebrow: "input", title: "t", subtitle: "int timestep", body: `<p>Integer timestep in [0, T−1].</p>` },
+  sinusoidal_embed: {
+    eyebrow: "composite",
+    title: "SinusoidalEmbedding",
+    subtitle: "sin/cos on geometric angular_speeds",
+    body: `<p>Turns an integer timestep into a 256-dim vector of sinusoids at geometrically-spaced frequencies —
+      the same encoding style as Transformer positional embeddings.</p>`,
+    zoom: "sinusoidal_embed",
+  },
+  angular_speeds: {
+    eyebrow: "buffer",
+    title: "angular_speeds",
+    subtitle: "torch.Tensor · shape (256 // 2,)",
+    body: `<p><code>2π × 10^{linspace(log10(min_freq), log10(max_freq), embed_size//2)}</code>. Registered as a
+      non-trainable buffer so it moves with <code>.to(device)</code> and lives in the state dict.</p>`,
+  },
+  sin_cos_concat: {
+    eyebrow: "op",
+    title: "concat(sin, cos)",
+    subtitle: "→ 256-dim",
+    body: `<p>For each angular speed θ, produce <code>sin(θt/T)</code> and <code>cos(θt/T)</code>, then concatenate.</p>`,
+  },
+  mlp_1: { eyebrow: "nn.Linear", title: "Linear (up-proj)", subtitle: "256 → 1024", body: `<p>First MLP layer of the time embedding pipeline. Expands to 4× width.</p>` },
+  mlp_2: { eyebrow: "nn.Linear", title: "Linear (down-proj)", subtitle: "1024 → 256", body: `<p>Second MLP layer. Contracts back to the embedding dimension.</p>` },
+  temb_out: { eyebrow: "tensor", title: "temb", subtitle: "256-dim", body: `<p>The final time+class embedding that gets injected into every ResBlock.</p>` },
+
+  /* out_head leaves */
+  oh_in: { eyebrow: "tensor", title: "x (post-decoder)", subtitle: "B, 128, 64²", body: `<p>The UNet's final feature map after all UpBlocks.</p>` },
+  oh_norm: { eyebrow: "nn.GroupNorm", title: "GroupNorm", subtitle: "n_groups=32", body: `<p>Pre-projection normalization.</p>` },
+  oh_silu: { eyebrow: "nn.SiLU", title: "SiLU", subtitle: "x · sigmoid(x)", body: `<p>Non-linearity before the final projection.</p>` },
+  oh_conv: { eyebrow: "nn.Conv2d", title: "Conv 3×3 (final)", subtitle: "128 → 4", body: `<p>Projects back to 4 latent channels — the predicted noise ε.</p>` },
+  oh_out: { eyebrow: "output", title: "ε̂ prediction", subtitle: "B, 4, 64²", body: `<p>The model's prediction of the noise that was added.</p>` },
+
+  /* Sampler internals */
+  x_T_init: { eyebrow: "tensor", title: "x_T", subtitle: "torch.randn — start of reverse process", body: `<p>The initial latent — pure isotropic Gaussian noise at the highest timestep.</p>` },
+  loop_body: { eyebrow: "loop", title: "Reverse schedule", subtitle: "linspace(T−1, 0, n_steps+1)", body: `<p>The scheduler picks which timesteps to visit; DDIM can freely skip.</p>` },
+  loop_step: {
+    eyebrow: "CFG wrap",
+    title: "CFG-wrapped model call",
+    subtitle: "eps = eps_uncond + w · (eps_cond − eps_uncond)",
+    body: `<p>Two forward passes per step when <code>guidance_scale ≠ 1</code>: one with the null class, one with the real
+      class. The difference is scaled by the guidance factor and added back.</p>`,
+  },
+  x_0_return: {
+    eyebrow: "convention",
+    title: "Return the last x₀ estimate",
+    subtitle: "cleaner than x_t at the end",
+    body: `<p>Because the cosine schedule never reaches perfectly clean data at t=0 (α ≈ 0.95 ≠ 1),
+      <code>x_t</code> at the last step still carries a bit of noise. The model's own x₀ prediction from the
+      final call is cleaner — that's what's returned.</p>`,
+  },
+};
+
+/* Aliases: multiple canvas nodes share the same drawer content */
+NODES["res_block"] = { eyebrow: "composite", title: "ResidualBlock", subtitle: "click box to zoom in", body: `<p>The workhorse block — two convs, time embedding injection, residual connection.</p>`, zoom: "res_block" };
+
+/* ================================================================
+   State: current zoom path
+   ================================================================ */
+const zoomStack = ["pipeline"];  /* top of stack = current view */
+
+const NAMES = {
+  pipeline: "Pipeline",
+  unet: "UNet",
+  down_block_0: "DownBlock 0",
+  down_block_1: "DownBlock 1",
+  down_block_2: "DownBlock 2",
+  up_block_0: "UpBlock 0",
+  up_block_1: "UpBlock 1",
+  up_block_2: "UpBlock 2",
+  mid_block: "MidBlock",
+  res_block: "ResidualBlock",
+  attn_block: "AttentionBlock",
+  noise_pipeline: "noise_pipeline",
+  sinusoidal_embed: "SinusoidalEmbedding",
+  temb_pipeline_add: "AdditiveTimeConditioning",
+  out_head: "out_head",
+  sampler_loop: "Sampler loop",
+};
+
+/* ================================================================
+   Zoom & view management
+   ================================================================ */
+function findView(name) {
+  return document.querySelector(`.view[data-view~="${name}"]`);
+}
+function showView(name, direction = "in") {
+  const target = findView(name);
+  if (!target) return;
+  document.querySelectorAll(".view").forEach(v => {
+    if (v === target) return;
+    v.classList.remove("active", "enter-from-parent", "enter-from-child");
+  });
+  target.classList.add("active");
+  target.classList.remove("enter-from-parent", "enter-from-child");
+  /* force reflow so the transition plays */
+  void target.offsetWidth;
+  target.classList.add(direction === "in" ? "enter-from-parent" : "enter-from-child");
+  requestAnimationFrame(() => {
+    target.classList.remove("enter-from-parent", "enter-from-child");
+  });
+}
+function updateBreadcrumb() {
+  const bc = document.getElementById("breadcrumb");
+  bc.innerHTML = "";
+  zoomStack.forEach((id, i) => {
+    if (i > 0) {
+      const sep = document.createElement("span");
+      sep.className = "sep";
+      sep.textContent = "/";
+      bc.appendChild(sep);
+    }
+    const c = document.createElement("span");
+    c.className = "crumb" + (i === zoomStack.length - 1 ? " current" : "");
+    c.textContent = NAMES[id] || id;
+    if (i < zoomStack.length - 1) {
+      c.addEventListener("click", () => zoomToDepth(i + 1));
+    }
+    bc.appendChild(c);
+  });
+}
+function zoomInto(nodeId) {
+  if (zoomStack[zoomStack.length - 1] === nodeId) return;
+  zoomStack.push(nodeId);
+  showView(nodeId, "in");
+  updateBreadcrumb();
+}
+function zoomOut() {
+  if (zoomStack.length <= 1) return;
+  zoomStack.pop();
+  showView(zoomStack[zoomStack.length - 1], "out");
+  updateBreadcrumb();
+}
+function zoomToDepth(depth) {
+  while (zoomStack.length > depth) zoomStack.pop();
+  showView(zoomStack[zoomStack.length - 1], "out");
+  updateBreadcrumb();
+}
+
+/* ================================================================
+   Drawer
+   ================================================================ */
+function openDrawer(nodeId) {
+  const info = NODES[nodeId];
+  if (!info) return;
+  document.getElementById("drawer-eyebrow").textContent  = info.eyebrow || "";
+  document.getElementById("drawer-title").textContent    = info.title    || nodeId;
+  document.getElementById("drawer-subtitle").textContent = info.subtitle || "";
+  document.getElementById("drawer-body").innerHTML       = info.body     || "<p>—</p>";
+  document.getElementById("drawer").classList.add("open");
+  document.getElementById("drawer-backdrop").classList.add("open");
+}
+function closeDrawer() {
+  document.getElementById("drawer").classList.remove("open");
+  document.getElementById("drawer-backdrop").classList.remove("open");
+}
+
+/* ================================================================
+   Wiring
+   ================================================================ */
+function wireCanvas() {
+  document.querySelectorAll(".view").forEach(view => {
+    view.querySelectorAll(".node").forEach(node => {
+      const id = node.dataset.node;
+      node.addEventListener("click", () => {
+        const info = NODES[id];
+        openDrawer(id);
+        if (info && info.zoom && node.classList.contains("composite")) {
+          setTimeout(() => zoomInto(info.zoom), 150);
+        }
+      });
+    });
+
+    /* Skip-connection hover: highlight matching UpBlock / DownBlock and arc */
+    view.querySelectorAll(".node[data-skip-match]").forEach(node => {
+      const matchId = node.dataset.skipMatch;
+      node.addEventListener("mouseenter", () => {
+        const partner = view.querySelector(`.node[data-node="${matchId}"]`);
+        if (partner) partner.classList.add("skip-match");
+        node.classList.add("skip-match");
+        /* Also highlight the arc between them */
+        view.querySelectorAll(".skip").forEach(p => p.classList.add("match-hover"));
+      });
+      node.addEventListener("mouseleave", () => {
+        view.querySelectorAll(".skip-match").forEach(n => n.classList.remove("skip-match"));
+        view.querySelectorAll(".match-hover").forEach(p => p.classList.remove("match-hover"));
+      });
+    });
+  });
+}
+document.getElementById("drawer-close").addEventListener("click", closeDrawer);
+document.getElementById("drawer-backdrop").addEventListener("click", closeDrawer);
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") {
+    if (document.getElementById("drawer").classList.contains("open")) {
+      closeDrawer();
+    } else {
+      zoomOut();
+    }
+  }
+});
+
+/* Sidebar active-section tracking via IntersectionObserver */
+function wireSidebar() {
+  const links = new Map();
+  document.querySelectorAll(".side-sections a[data-nav]").forEach(a => {
+    links.set(a.dataset.nav, a);
+  });
+  const io = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        links.forEach(a => a.classList.remove("active"));
+        const a = links.get(e.target.id);
+        if (a) a.classList.add("active");
+      }
+    });
+  }, { rootMargin: "-40% 0px -55% 0px", threshold: 0 });
+  document.querySelectorAll("section[id], main > div[id], main > header[id]").forEach(el => io.observe(el));
+}
+
+/* Init */
+window.addEventListener("DOMContentLoaded", () => {
+  wireCanvas();
+  showView("pipeline", "in");
+  updateBreadcrumb();
+  wireSidebar();
+});
+</script>
+
+</body>
+</html>

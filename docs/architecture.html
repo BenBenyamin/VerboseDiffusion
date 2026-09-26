@@ -665,7 +665,7 @@ footer a { color: var(--accent); }
     <div class="view" data-view="pipeline">
       <svg viewBox="0 0 900 420">
         <text class="group-label" x="30" y="30">The pipeline</text>
-        <text class="flow-label" x="30" y="50">real image → VAE encode → latent → forward noise → UNet denoise → VAE decode</text>
+        <text class="flow-label" x="30" y="50">image → encode → latent → +noise → UNet → decode → sample</text>
 
         <!-- Real image -->
         <g class="node leaf" data-node="real_image" transform="translate(30, 90)">
@@ -734,26 +734,26 @@ footer a { color: var(--accent); }
 
         <!-- Class label -->
         <g class="node leaf" data-node="class_input" transform="translate(510, 40)">
-          <rect width="170" height="52" />
-          <text class="lbl" x="85" y="24">class label c</text>
-          <text class="sub" x="85" y="40">{cat, dog, wild}</text>
+          <rect width="82" height="52" />
+          <text class="lbl" x="41" y="24">class c</text>
+          <text class="sub" x="41" y="40">cat/dog/wild</text>
         </g>
 
         <!-- Timestep t -->
-        <g class="node leaf" data-node="timestep_input" transform="translate(700, 40)">
-          <rect width="150" height="52" />
-          <text class="lbl" x="75" y="24">timestep t</text>
-          <text class="sub" x="75" y="40">∈ {0..T−1}</text>
+        <g class="node leaf" data-node="timestep_input" transform="translate(598, 40)">
+          <rect width="82" height="52" />
+          <text class="lbl" x="41" y="24">timestep t</text>
+          <text class="sub" x="41" y="40">∈ {0..T−1}</text>
         </g>
 
         <!-- Arrows -->
         <line class="arrow" x1="160" y1="120" x2="180" y2="120" />
         <line class="arrow" x1="310" y1="120" x2="330" y2="120" />
-        <line class="arrow" x1="460" y1="140" x2="510" y2="180" />
+        <line class="arrow" x1="395" y1="150" x2="395" y2="190" />
         <line class="arrow" x1="310" y1="220" x2="330" y2="220" />
         <line class="arrow" x1="460" y1="220" x2="510" y2="200" />
-        <line class="arrow" x1="595" y1="92" x2="595" y2="140" />
-        <line class="arrow" x1="775" y1="92" x2="775" y2="140" />
+        <line class="arrow" x1="551" y1="92" x2="551" y2="140" />
+        <line class="arrow" x1="639" y1="92" x2="639" y2="140" />
         <line class="arrow" x1="680" y1="200" x2="700" y2="200" />
         <line class="arrow" x1="700" y1="260" x2="480" y2="340" />
         <line class="arrow" x1="340" y1="350" x2="320" y2="350" />
@@ -900,7 +900,7 @@ footer a { color: var(--accent); }
         <g class="node composite" data-node="attn_block" transform="translate(500, 140)">
           <rect width="130" height="90" />
           <text class="lbl" x="65" y="34">AttentionBlock</text>
-          <text class="sub" x="65" y="54">optional, at deep levels</text>
+          <text class="sub" x="65" y="54">only at deep levels</text>
           <text class="sub" x="65" y="72" fill="var(--accent)">↳ zoom</text>
         </g>
 
@@ -1120,10 +1120,10 @@ footer a { color: var(--accent); }
           <text class="lbl" x="60" y="24">unflatten</text>
           <text class="sub" x="60" y="40">B,HW,C → B,C,H,W</text>
         </g>
-        <g class="node leaf" data-node="attn_residual_add" transform="translate(660, 290)">
-          <rect width="120" height="52" />
-          <text class="lbl" x="60" y="24">+ residual</text>
-          <text class="sub" x="60" y="40">essential — see notes</text>
+        <g class="node leaf" data-node="attn_residual_add" transform="translate(645, 290)">
+          <rect width="150" height="52" />
+          <text class="lbl" x="75" y="24">+ residual</text>
+          <text class="sub" x="75" y="40">essential — see notes</text>
         </g>
 
         <line class="arrow" x1="100" y1="196" x2="130" y2="196" />
@@ -1133,8 +1133,8 @@ footer a { color: var(--accent); }
         <line class="arrow" x1="640" y1="196" x2="660" y2="196" />
         <line class="arrow" x1="720" y1="222" x2="720" y2="290" />
 
-        <path class="skip" d="M 65 222 L 65 316 L 660 316" />
-        <line class="arrow" x1="170" y1="316" x2="660" y2="316" />
+        <path class="skip" d="M 65 222 L 65 316 L 645 316" />
+        <line class="arrow" x1="170" y1="316" x2="645" y2="316" />
       </svg>
     </div>
 
@@ -1147,7 +1147,7 @@ footer a { color: var(--accent); }
         <g class="node leaf" data-node="in_t" transform="translate(30, 130)">
           <rect width="80" height="52" />
           <text class="lbl" x="40" y="24">t</text>
-          <text class="sub" x="40" y="40">int, ∈{0..T−1}</text>
+          <text class="sub" x="40" y="40">∈ {0..T−1}</text>
         </g>
         <g class="node composite" data-node="sinusoidal_embed" transform="translate(140, 130)">
           <rect width="170" height="52" />
